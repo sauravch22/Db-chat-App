@@ -26,25 +26,31 @@ class OllamaService:
     ) -> str:
         """Generate SQL query from natural language"""
         
-        system_prompt = """You are a SQL expert. Generate a single SQL query to answer the user question.
+        # Extract exact table names from the schema context to enforce as hard constraints
+        exact_tables = [
+            line.split("Table:", 1)[1].strip()
+            for line in schema_context.splitlines()
+            if line.startswith("Table:")
+        ]
+        table_list_str = ", ".join(exact_tables) if exact_tables else "(see schema)"
 
-IMPORTANT RULES:
-1. Only use SELECT statements
-2. Return ONLY the SQL query, no explanation
-3. Use the provided table schema
-4. Generate valid SQL that can execute immediately
-5. Do NOT make assumptions about column names not provided"""
-        
-        full_prompt = f"""
+        system_prompt = f"""You are a PostgreSQL SQL expert. Your ONLY job is to output a single raw SQL SELECT query.
+
+STRICT RULES:
+1. Output ONLY the SQL query — no explanation, no preamble, no commentary
+2. Do NOT write "Here is", "The SQL is", or any sentence before or after the query
+3. Only use SELECT statements — never INSERT, UPDATE, DELETE, DROP
+4. EXACT TABLE NAMES YOU MUST USE (copy these letter-for-letter, do NOT pluralize, singularize, or change them in any way): {table_list_str}
+5. Use ONLY column names listed in the schema below — do not guess or invent names
+6. Use standard PostgreSQL syntax — double quotes for identifiers if needed, NOT backticks
+7. Do not wrap the query in markdown code fences"""
+
+        full_prompt = f"""Schema:
 {schema_context}
-
-Sample data patterns:
-{sample_info}
 
 User Question: {user_prompt}
 
-Generate the SQL query:
-"""
+SQL query:"""
         
         try:
             async with httpx.AsyncClient() as client:
@@ -55,7 +61,7 @@ Generate the SQL query:
                         "prompt": full_prompt,
                         "system": system_prompt,
                         "stream": False,
-                        "temperature": 0.7,
+                        "temperature": 0.0,
                     },
                     timeout=60.0
                 )
@@ -63,9 +69,17 @@ Generate the SQL query:
                 if response.status_code == 200:
                     result = response.json()
                     sql = result.get("response", "").strip()
-                    # Remove markdown code blocks if present
-                    sql = sql.replace("```sql\n", "").replace("```", "").strip()
-                    return sql
+                    # Strip markdown code fences
+                    sql = sql.replace("```sql", "").replace("```", "").strip()
+                    # If LLM added explanation text before SELECT, extract from SELECT onwards
+                    upper = sql.upper()
+                    select_pos = upper.find("SELECT")
+                    if select_pos > 0:
+                        sql = sql[select_pos:]
+                    # Strip trailing explanation after the semicolon
+                    if ";" in sql:
+                        sql = sql[:sql.index(";") + 1]
+                    return sql.strip()
                 else:
                     logger.error(f"Ollama error: {response.text}")
                     raise Exception(f"Ollama returned status code {response.status_code}")
@@ -102,9 +116,19 @@ Generate the SQL query:
     async def classify_intent(self, text: str) -> str:
         """Classify user prompt intent using Ollama. Returns one of: 'catalog' or 'data'."""
         system = (
-            "You are a classifier that decides whether the user's prompt is a catalog/introspection request "
-            "(about schema, indexes, connections, slow queries, table lists) or a data query that should be "
-            "converted to an executable SQL against the user's database. Respond with a single word: 'catalog' or 'data'."
+            "You are a query classifier. Classify the user prompt into exactly one of two categories:\n"
+            "\n"
+            "catalog: The user is asking about DATABASE STRUCTURE or SYSTEM METADATA only.\n"
+            "  Examples: 'show me the schema of artist table', 'what indexes exist on invoice?',\n"
+            "  'how many open connections are there?', 'list all tables', 'show slow queries'\n"
+            "\n"
+            "data: The user wants to RETRIEVE, COUNT, FILTER or AGGREGATE actual data rows.\n"
+            "  Examples: 'give all artists', 'how many albums are there?', 'show me all tracks',\n"
+            "  'list all customers', 'give me all rows from artist', 'show all employees'\n"
+            "\n"
+            "IMPORTANT: Any prompt that asks to 'give', 'show', 'list', 'get', 'fetch', 'find' or "
+            "'count' actual records is ALWAYS 'data', even if it mentions a table name.\n"
+            "Respond with a single word only: catalog or data."
         )
 
         try:

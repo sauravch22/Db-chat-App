@@ -94,11 +94,17 @@ class VectorService:
             # Add filter if provided
             if filters:
                 payload["filter"] = filters
+                logger.info(f"Vector search with filter: {filters}")
 
+            logger.debug(f"Searching Qdrant at {url} with limit={top_k}")
             r = httpx.post(url, json=payload, timeout=10.0)
             r.raise_for_status()
             data = r.json()
             results = data.get("result", [])
+
+            logger.info(f"Vector search returned {len(results)} results")
+            for i, item in enumerate(results[:3]):
+                logger.debug(f"  Result {i+1}: score={item.get('score', 0):.3f}, table={item.get('payload', {}).get('table_name')}, type={item.get('payload', {}).get('type')}")
 
             return [
                 {
@@ -109,7 +115,7 @@ class VectorService:
             ]
 
         except Exception as e:
-            logger.error(f"Error searching vectors: {str(e)}")
+            logger.error(f"Error searching vectors: {str(e)}", exc_info=True)
             raise
     
     async def health_check(self) -> bool:
