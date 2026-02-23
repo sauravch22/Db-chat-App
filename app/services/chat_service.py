@@ -47,15 +47,36 @@ class ChatService:
                 }
 
             logger.info("Classifying intent for prompt")
-            intent = await self.ollama.classify_intent(user_prompt)
-            logger.info(f"Intent classified as: {intent}")
+            # Fast keyword pre-check: structural words always mean catalog
+            _structural_keywords = [
+                "schema", "describe", "definition", "indexes", "indices", "ddl",
+                "structure of", "columns of", "primary key", "foreign key",
+                "constraints", "row count", "row size", "table size",
+                "list tables", "show tables", "all tables", "what tables",
+                "list all tables", "show all tables"
+            ]
+            if any(kw in user_prompt.lower() for kw in _structural_keywords):
+                intent = "catalog"
+                logger.info("Intent pre-classified as catalog (structural keyword match)")
+            else:
+                intent = await self.ollama.classify_intent(user_prompt)
+                logger.info(f"Intent classified as: {intent}")
 
             if intent == "catalog":
                 catalog_result = await self._handle_catalog_query(connection, user_prompt)
                 # If catalog handler found no matching pattern, fall back to data path
                 if catalog_result.get("answers"):
-                    catalog_result["execution_time_ms"] = int((time.time() - start_time) * 1000)
-                    return catalog_result
+                    answer_text = self._format_catalog_answers(catalog_result["answers"])
+                    return {
+                        "status": "success",
+                        "answer": answer_text,
+                        "sql": None,
+                        "rows": None,
+                        "columns": None,
+                        "row_count": None,
+                        "execution_time_ms": int((time.time() - start_time) * 1000),
+                        "query_time_ms": None
+                    }
                 logger.info("Catalog handler returned empty answers, falling back to data path")
 
             logger.info(f"Embedding prompt: {user_prompt[:50]}...")
@@ -198,6 +219,75 @@ class ChatService:
                 "execution_time_ms": int((time.time() - start_time) * 1000)
             }
 
+    def _format_catalog_answers(self, answers: dict) -> str:
+        """Convert catalog answers dict into a human-readable string."""
+        parts = []
+        for key, value in answers.items():
+            if key == "tables":
+                parts.append("Tables in database:\n" + "\n".join(f"  - {t}" for t in value))
+            elif key.startswith("schema:"):
+                tbl = key.split(":", 1)[1]
+                col_lines = "\n".join(
+                    f"  {c['column_name']} — {c['data_type']}"
+                    f"{' (nullable)' if c.get('is_nullable') == 'YES' else ''}"
+                    f"{' default: ' + str(c['column_default']) if c.get('column_default') else ''}"
+                    for c in value
+                )
+                parts.append(f"Schema of '{tbl}':\n{col_lines}")
+            elif key.startswith("indexes:"):
+                tbl = key.split(":", 1)[1]
+                idx_lines = "\n".join(
+                    f"  {r['indexname']}: ({r['columns']})"
+                    for r in value
+                )
+                parts.append(f"Indexes on '{tbl}':\n{idx_lines}")
+            elif key.startswith("primary_key:"):
+                tbl = key.split(":", 1)[1]
+                if value:
+                    parts.append(f"Primary key of '{tbl}': {', '.join(value)}")
+                else:
+                    parts.append(f"No primary key found on '{tbl}'")
+            elif key.startswith("foreign_keys:"):
+                tbl = key.split(":", 1)[1]
+                if value:
+                    fk_lines = "\n".join(
+                        f"  {r['column_name']} → {r['foreign_table']}.{r['foreign_column']}"
+                        for r in value
+                    )
+                    parts.append(f"Foreign keys of '{tbl}':\n{fk_lines}")
+                else:
+                    parts.append(f"No foreign keys found on '{tbl}'")
+            elif key.startswith("constraints:"):
+                tbl = key.split(":", 1)[1]
+                if value:
+                    con_lines = "\n".join(
+                        f"  [{r['constraint_type']}] {r['constraint_name']}: {r['column_name']}"
+                        for r in value
+                    )
+                    parts.append(f"Constraints on '{tbl}':\n{con_lines}")
+                else:
+                    parts.append(f"No constraints found on '{tbl}'")
+            elif key.startswith("row_count:"):
+                tbl = key.split(":", 1)[1]
+                parts.append(f"Row count of '{tbl}': {value:,}")
+            elif key == "open_connections":
+                parts.append(f"Open connections: {value}")
+            elif key == "active_queries":
+                q_lines = "\n".join(
+                    f"  pid={r['pid']} state={r['state']} duration={r['duration']}"
+                    for r in value[:5]
+                )
+                parts.append(f"Active queries:\n{q_lines}")
+            elif key == "slow_queries":
+                q_lines = "\n".join(
+                    f"  pid={r['pid']} duration={r['duration']} query={str(r['query'])[:80]}"
+                    for r in value[:5]
+                )
+                parts.append(f"Slow queries:\n{q_lines}")
+            else:
+                parts.append(f"{key}:\n{value}")
+        return "\n\n".join(parts)
+
     async def _build_schema_context(
         self,
         connection_id: int,
@@ -240,15 +330,24 @@ class ChatService:
             lower = prompt.lower()
             result: Dict[str, Any] = {"status": "success", "type": "catalog", "answers": {}}
 
-            if any(k in lower for k in ["tables", "list tables", "what tables"]):
+            _list_tables_phrases = [
+                "list tables", "show tables", "all tables", "what tables",
+                "list all tables", "show all tables", "tables in the database",
+                "tables in this database", "tables in the db"
+            ]
+            if any(k in lower for k in _list_tables_phrases):
                 with engine.connect() as conn:
                     res = conn.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name;"))
                     tables = [r[0] for r in res.fetchall()]
                 result["answers"]["tables"] = tables
 
-            m = re.search(r"schema of ([a-zA-Z_][a-zA-Z0-9_]*)", lower)
+            m = re.search(
+                r"(?:schema|definition|structure)\s+(?:of|for)\s+(?:the\s+)?([a-zA-Z_][a-zA-Z0-9_]*)"
+                r"|describe\s+(?:the\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:table\b)?",
+                lower
+            )
             if m:
-                tbl = m.group(1)
+                tbl = (m.group(1) or m.group(2)).strip()
                 with engine.connect() as conn:
                     cols = conn.execute(
                         text("SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema='public' AND table_name=:t ORDER BY ordinal_position;"),
@@ -256,9 +355,14 @@ class ChatService:
                     ).fetchall()
                 result["answers"][f"schema:{tbl}"] = [dict(r._mapping) for r in cols]
 
-            m2 = re.search(r"columns in ([a-zA-Z_][a-zA-Z0-9_]*) .*index", lower)
+            m2 = re.search(
+                r"(?:indexes?|indices)\s+(?:exist\s+)?(?:on|of|for|in)\s+(?:the\s+)?([a-zA-Z_][a-zA-Z0-9_]*)"
+                r"|(?:on|of|for|in)\s+(?:the\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s+(?:indexes?|indices)"
+                r"|(?:what|which|show|list)\s+indexes?.*?(?:on|of|for|in)\s+(?:the\s+)?([a-zA-Z_][a-zA-Z0-9_]*)",
+                lower
+            )
             if m2:
-                tbl = m2.group(1)
+                tbl = (m2.group(1) or m2.group(2) or m2.group(3)).strip()
                 with engine.connect() as conn:
                     idx_sql = text("""
                         SELECT i.relname as indexname, array_to_string(array_agg(a.attname), ',') as columns
@@ -271,6 +375,69 @@ class ChatService:
                     """)
                     rows = conn.execute(idx_sql, {"t": tbl}).fetchall()
                 result["answers"][f"indexes:{tbl}"] = [dict(r._mapping) for r in rows]
+
+            # Primary key
+            m_pk = re.search(r"primary key.*?(?:of|for|on)\s+([a-zA-Z_][a-zA-Z0-9_]*)|(?:of|for|on)\s+([a-zA-Z_][a-zA-Z0-9_]*).*?primary key", lower)
+            if m_pk:
+                tbl = (m_pk.group(1) or m_pk.group(2)).strip()
+                with engine.connect() as conn:
+                    pk_rows = conn.execute(text("""
+                        SELECT kcu.column_name
+                        FROM information_schema.table_constraints tc
+                        JOIN information_schema.key_column_usage kcu
+                          ON tc.constraint_name = kcu.constraint_name
+                         AND tc.table_schema = kcu.table_schema
+                        WHERE tc.constraint_type = 'PRIMARY KEY'
+                          AND tc.table_schema = 'public'
+                          AND tc.table_name = :t
+                        ORDER BY kcu.ordinal_position;
+                    """), {"t": tbl}).fetchall()
+                result["answers"][f"primary_key:{tbl}"] = [r[0] for r in pk_rows]
+
+            # Foreign keys
+            m_fk = re.search(r"foreign key.*?(?:of|for|on)\s+([a-zA-Z_][a-zA-Z0-9_]*)|(?:of|for|on)\s+([a-zA-Z_][a-zA-Z0-9_]*).*?foreign key", lower)
+            if m_fk:
+                tbl = (m_fk.group(1) or m_fk.group(2)).strip()
+                with engine.connect() as conn:
+                    fk_rows = conn.execute(text("""
+                        SELECT kcu.column_name, ccu.table_name AS foreign_table, ccu.column_name AS foreign_column
+                        FROM information_schema.table_constraints tc
+                        JOIN information_schema.key_column_usage kcu
+                          ON tc.constraint_name = kcu.constraint_name
+                         AND tc.table_schema = kcu.table_schema
+                        JOIN information_schema.constraint_column_usage ccu
+                          ON ccu.constraint_name = tc.constraint_name
+                         AND ccu.table_schema = tc.table_schema
+                        WHERE tc.constraint_type = 'FOREIGN KEY'
+                          AND tc.table_schema = 'public'
+                          AND tc.table_name = :t;
+                    """), {"t": tbl}).fetchall()
+                result["answers"][f"foreign_keys:{tbl}"] = [dict(r._mapping) for r in fk_rows]
+
+            # All constraints
+            m_con = re.search(r"constraints.*?(?:of|for|on)\s+([a-zA-Z_][a-zA-Z0-9_]*)|(?:of|for|on)\s+([a-zA-Z_][a-zA-Z0-9_]*).*?constraints", lower)
+            if m_con and not m_pk and not m_fk:
+                tbl = (m_con.group(1) or m_con.group(2)).strip()
+                with engine.connect() as conn:
+                    con_rows = conn.execute(text("""
+                        SELECT tc.constraint_name, tc.constraint_type, kcu.column_name
+                        FROM information_schema.table_constraints tc
+                        JOIN information_schema.key_column_usage kcu
+                          ON tc.constraint_name = kcu.constraint_name
+                         AND tc.table_schema = kcu.table_schema
+                        WHERE tc.table_schema = 'public'
+                          AND tc.table_name = :t
+                        ORDER BY tc.constraint_type, kcu.ordinal_position;
+                    """), {"t": tbl}).fetchall()
+                result["answers"][f"constraints:{tbl}"] = [dict(r._mapping) for r in con_rows]
+
+            # Row count / table size
+            m_rc = re.search(r"(?:row count|row size|table size|how many rows).*?(?:of|for|in)\s+([a-zA-Z_][a-zA-Z0-9_]*)|(?:of|for|in)\s+([a-zA-Z_][a-zA-Z0-9_]*).*?(?:row count|row size|table size)", lower)
+            if m_rc:
+                tbl = (m_rc.group(1) or m_rc.group(2)).strip()
+                with engine.connect() as conn:
+                    cnt = conn.execute(text(f'SELECT COUNT(*) FROM "{tbl}"')).scalar()
+                result["answers"][f"row_count:{tbl}"] = int(cnt)
 
             if any(k in lower for k in ["open connections", "connections", "active connections"]):
                 with engine.connect() as conn:
