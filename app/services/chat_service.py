@@ -49,9 +49,9 @@ class ChatService:
             logger.info("Classifying intent for prompt")
             # Fast keyword pre-check: structural words always mean catalog
             _structural_keywords = [
-                "schema", "describe", "definition", "indexes", "indices", "ddl",
-                "structure of", "columns of", "primary key", "foreign key",
-                "constraints", "row count", "row size", "table size",
+                "schema", "schemas", "describe", "definition", "indexes", "indices", "ddl",
+                "structure of", "columns of", "primary key", "primary keys", "foreign key", "foreign keys",
+                "constraints", "row count", "row size", "table size", "how many rows",
                 "list tables", "show tables", "all tables", "what tables",
                 "list all tables", "show all tables"
             ]
@@ -330,6 +330,23 @@ class ChatService:
             lower = prompt.lower()
             result: Dict[str, Any] = {"status": "success", "type": "catalog", "answers": {}}
 
+            # Fetch all known table names for this connection ONCE — shared by all handlers.
+            # This powers multi-table detection: any known table name appearing as a whole
+            # word in the prompt is treated as an intended target table.
+            _known_tables_list = [
+                t.name for t in self.db.query(Table).filter(
+                    Table.database_id.in_(
+                        self.db.query(Database.id).filter(
+                            Database.connection_id == connection.id
+                        )
+                    )
+                ).all()
+            ]
+            _known_tables_set = set(_known_tables_list)
+            _prompt_words = set(re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', lower))
+            # Tables explicitly mentioned in the prompt (preserves metadata order)
+            _mentioned_tables = [t for t in _known_tables_list if t in _prompt_words]
+
             _list_tables_phrases = [
                 "list tables", "show tables", "all tables", "what tables",
                 "list all tables", "show all tables", "tables in the database",
@@ -341,103 +358,122 @@ class ChatService:
                     tables = [r[0] for r in res.fetchall()]
                 result["answers"]["tables"] = tables
 
-            m = re.search(
-                r"(?:schema|definition|structure)\s+(?:of|for)\s+(?:the\s+)?([a-zA-Z_][a-zA-Z0-9_]*)"
-                r"|describe\s+(?:the\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:table\b)?",
+            # Detect schema intent broadly (handles singular/plural/describe)
+            _schema_intent = re.search(
+                r"\bschemas?\b|\bdescribe\b|\bdefinition\b|\bstructure\b",
                 lower
             )
-            if m:
-                tbl = (m.group(1) or m.group(2)).strip()
-                with engine.connect() as conn:
-                    cols = conn.execute(
-                        text("SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema='public' AND table_name=:t ORDER BY ordinal_position;"),
-                        {"t": tbl}
-                    ).fetchall()
-                result["answers"][f"schema:{tbl}"] = [dict(r._mapping) for r in cols]
+            if _schema_intent:
+                # Method A: regex findall for explicit 'schema of X' / 'describe X' patterns
+                # filtered through known table names to prevent false positives
+                regex_tables = [
+                    t for t in (
+                        (g1 or g2).strip()
+                        for g1, g2 in re.findall(
+                            r"(?:schema|definition|structure)s?\s+(?:of|for)\s+(?:the\s+)?([a-zA-Z_][a-zA-Z0-9_]*)"
+                            r"|describe\s+(?:the\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:table\b)?",
+                            lower
+                        )
+                        if g1 or g2
+                    )
+                    if t in _known_tables_set
+                ]
+                # Method B: cross-reference all known table names against whole words
+                # in the prompt — catches comma/and-separated multi-table lists
+                word_tables = [t for t in _known_tables_list if t in _prompt_words]
+                # Union both methods, preserve order, deduplicate
+                seen_schema = set()
+                schema_tables = []
+                for t in regex_tables + word_tables:
+                    if t not in seen_schema:
+                        seen_schema.add(t)
+                        schema_tables.append(t)
+                for tbl in schema_tables:
+                    with engine.connect() as conn:
+                        cols = conn.execute(
+                            text("SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema='public' AND table_name=:t ORDER BY ordinal_position;"),
+                            {"t": tbl}
+                        ).fetchall()
+                    result["answers"][f"schema:{tbl}"] = [dict(r._mapping) for r in cols]
 
-            m2 = re.search(
-                r"(?:indexes?|indices)\s+(?:exist\s+)?(?:on|of|for|in)\s+(?:the\s+)?([a-zA-Z_][a-zA-Z0-9_]*)"
-                r"|(?:on|of|for|in)\s+(?:the\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s+(?:indexes?|indices)"
-                r"|(?:what|which|show|list)\s+indexes?.*?(?:on|of|for|in)\s+(?:the\s+)?([a-zA-Z_][a-zA-Z0-9_]*)",
-                lower
-            )
-            if m2:
-                tbl = (m2.group(1) or m2.group(2) or m2.group(3)).strip()
-                with engine.connect() as conn:
-                    idx_sql = text("""
-                        SELECT i.relname as indexname, array_to_string(array_agg(a.attname), ',') as columns
-                        FROM pg_class t
-                        JOIN pg_index ix ON t.oid = ix.indrelid
-                        JOIN pg_class i ON i.oid = ix.indexrelid
-                        JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
-                        WHERE t.relname = :t
-                        GROUP BY i.relname;
-                    """)
-                    rows = conn.execute(idx_sql, {"t": tbl}).fetchall()
-                result["answers"][f"indexes:{tbl}"] = [dict(r._mapping) for r in rows]
+            # INDEXES — multi-table aware
+            if re.search(r'\bindexes?\b|\bindices\b', lower) and _mentioned_tables:
+                for tbl in _mentioned_tables:
+                    with engine.connect() as conn:
+                        rows = conn.execute(text("""
+                            SELECT i.relname as indexname,
+                                   array_to_string(array_agg(a.attname ORDER BY a.attnum), ',') as columns
+                            FROM pg_class t
+                            JOIN pg_index ix ON t.oid = ix.indrelid
+                            JOIN pg_class i  ON i.oid  = ix.indexrelid
+                            JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+                            WHERE t.relname = :t
+                            GROUP BY i.relname;
+                        """), {"t": tbl}).fetchall()
+                    result["answers"][f"indexes:{tbl}"] = [dict(r._mapping) for r in rows]
 
-            # Primary key
-            m_pk = re.search(r"primary key.*?(?:of|for|on)\s+([a-zA-Z_][a-zA-Z0-9_]*)|(?:of|for|on)\s+([a-zA-Z_][a-zA-Z0-9_]*).*?primary key", lower)
-            if m_pk:
-                tbl = (m_pk.group(1) or m_pk.group(2)).strip()
-                with engine.connect() as conn:
-                    pk_rows = conn.execute(text("""
-                        SELECT kcu.column_name
-                        FROM information_schema.table_constraints tc
-                        JOIN information_schema.key_column_usage kcu
-                          ON tc.constraint_name = kcu.constraint_name
-                         AND tc.table_schema = kcu.table_schema
-                        WHERE tc.constraint_type = 'PRIMARY KEY'
-                          AND tc.table_schema = 'public'
-                          AND tc.table_name = :t
-                        ORDER BY kcu.ordinal_position;
-                    """), {"t": tbl}).fetchall()
-                result["answers"][f"primary_key:{tbl}"] = [r[0] for r in pk_rows]
+            # PRIMARY KEY — multi-table aware
+            if re.search(r'\bprimary\s+keys?\b', lower) and _mentioned_tables:
+                for tbl in _mentioned_tables:
+                    with engine.connect() as conn:
+                        pk_rows = conn.execute(text("""
+                            SELECT kcu.column_name
+                            FROM information_schema.table_constraints tc
+                            JOIN information_schema.key_column_usage kcu
+                              ON tc.constraint_name = kcu.constraint_name
+                             AND tc.table_schema    = kcu.table_schema
+                            WHERE tc.constraint_type = 'PRIMARY KEY'
+                              AND tc.table_schema    = 'public'
+                              AND tc.table_name      = :t
+                            ORDER BY kcu.ordinal_position;
+                        """), {"t": tbl}).fetchall()
+                    result["answers"][f"primary_key:{tbl}"] = [r[0] for r in pk_rows]
 
-            # Foreign keys
-            m_fk = re.search(r"foreign key.*?(?:of|for|on)\s+([a-zA-Z_][a-zA-Z0-9_]*)|(?:of|for|on)\s+([a-zA-Z_][a-zA-Z0-9_]*).*?foreign key", lower)
-            if m_fk:
-                tbl = (m_fk.group(1) or m_fk.group(2)).strip()
-                with engine.connect() as conn:
-                    fk_rows = conn.execute(text("""
-                        SELECT kcu.column_name, ccu.table_name AS foreign_table, ccu.column_name AS foreign_column
-                        FROM information_schema.table_constraints tc
-                        JOIN information_schema.key_column_usage kcu
-                          ON tc.constraint_name = kcu.constraint_name
-                         AND tc.table_schema = kcu.table_schema
-                        JOIN information_schema.constraint_column_usage ccu
-                          ON ccu.constraint_name = tc.constraint_name
-                         AND ccu.table_schema = tc.table_schema
-                        WHERE tc.constraint_type = 'FOREIGN KEY'
-                          AND tc.table_schema = 'public'
-                          AND tc.table_name = :t;
-                    """), {"t": tbl}).fetchall()
-                result["answers"][f"foreign_keys:{tbl}"] = [dict(r._mapping) for r in fk_rows]
+            # FOREIGN KEYS — multi-table aware
+            if re.search(r'\bforeign\s+keys?\b', lower) and _mentioned_tables:
+                for tbl in _mentioned_tables:
+                    with engine.connect() as conn:
+                        fk_rows = conn.execute(text("""
+                            SELECT kcu.column_name,
+                                   ccu.table_name  AS foreign_table,
+                                   ccu.column_name AS foreign_column
+                            FROM information_schema.table_constraints tc
+                            JOIN information_schema.key_column_usage kcu
+                              ON tc.constraint_name = kcu.constraint_name
+                             AND tc.table_schema    = kcu.table_schema
+                            JOIN information_schema.constraint_column_usage ccu
+                              ON ccu.constraint_name = tc.constraint_name
+                             AND ccu.table_schema    = tc.table_schema
+                            WHERE tc.constraint_type = 'FOREIGN KEY'
+                              AND tc.table_schema    = 'public'
+                              AND tc.table_name      = :t;
+                        """), {"t": tbl}).fetchall()
+                    result["answers"][f"foreign_keys:{tbl}"] = [dict(r._mapping) for r in fk_rows]
 
-            # All constraints
-            m_con = re.search(r"constraints.*?(?:of|for|on)\s+([a-zA-Z_][a-zA-Z0-9_]*)|(?:of|for|on)\s+([a-zA-Z_][a-zA-Z0-9_]*).*?constraints", lower)
-            if m_con and not m_pk and not m_fk:
-                tbl = (m_con.group(1) or m_con.group(2)).strip()
-                with engine.connect() as conn:
-                    con_rows = conn.execute(text("""
-                        SELECT tc.constraint_name, tc.constraint_type, kcu.column_name
-                        FROM information_schema.table_constraints tc
-                        JOIN information_schema.key_column_usage kcu
-                          ON tc.constraint_name = kcu.constraint_name
-                         AND tc.table_schema = kcu.table_schema
-                        WHERE tc.table_schema = 'public'
-                          AND tc.table_name = :t
-                        ORDER BY tc.constraint_type, kcu.ordinal_position;
-                    """), {"t": tbl}).fetchall()
-                result["answers"][f"constraints:{tbl}"] = [dict(r._mapping) for r in con_rows]
+            # ALL CONSTRAINTS — multi-table aware (skip if PK/FK already handled)
+            _has_pk_intent = bool(re.search(r'\bprimary\s+keys?\b', lower))
+            _has_fk_intent = bool(re.search(r'\bforeign\s+keys?\b', lower))
+            if re.search(r'\bconstraints?\b', lower) and not _has_pk_intent and not _has_fk_intent and _mentioned_tables:
+                for tbl in _mentioned_tables:
+                    with engine.connect() as conn:
+                        con_rows = conn.execute(text("""
+                            SELECT tc.constraint_name, tc.constraint_type, kcu.column_name
+                            FROM information_schema.table_constraints tc
+                            JOIN information_schema.key_column_usage kcu
+                              ON tc.constraint_name = kcu.constraint_name
+                             AND tc.table_schema    = kcu.table_schema
+                            WHERE tc.table_schema = 'public'
+                              AND tc.table_name   = :t
+                            ORDER BY tc.constraint_type, kcu.ordinal_position;
+                        """), {"t": tbl}).fetchall()
+                    result["answers"][f"constraints:{tbl}"] = [dict(r._mapping) for r in con_rows]
 
-            # Row count / table size
-            m_rc = re.search(r"(?:row count|row size|table size|how many rows).*?(?:of|for|in)\s+([a-zA-Z_][a-zA-Z0-9_]*)|(?:of|for|in)\s+([a-zA-Z_][a-zA-Z0-9_]*).*?(?:row count|row size|table size)", lower)
-            if m_rc:
-                tbl = (m_rc.group(1) or m_rc.group(2)).strip()
-                with engine.connect() as conn:
-                    cnt = conn.execute(text(f'SELECT COUNT(*) FROM "{tbl}"')).scalar()
-                result["answers"][f"row_count:{tbl}"] = int(cnt)
+            # ROW COUNT — multi-table aware
+            if re.search(r'\brow\s+count\b|\brow\s+size\b|\btable\s+size\b|\bhow\s+many\s+rows\b', lower) and _mentioned_tables:
+                for tbl in _mentioned_tables:
+                    with engine.connect() as conn:
+                        cnt = conn.execute(text(f'SELECT COUNT(*) FROM "{tbl}"')).scalar()
+                    result["answers"][f"row_count:{tbl}"] = int(cnt)
 
             if any(k in lower for k in ["open connections", "connections", "active connections"]):
                 with engine.connect() as conn:

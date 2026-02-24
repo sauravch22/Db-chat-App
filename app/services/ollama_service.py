@@ -63,7 +63,7 @@ SQL query:"""
                         "stream": False,
                         "temperature": 0.0,
                     },
-                    timeout=60.0
+                    timeout=120.0
                 )
                 
                 if response.status_code == 200:
@@ -99,7 +99,7 @@ SQL query:"""
                         "model": self.embedding_model,
                         "input": text,
                     },
-                    timeout=30.0
+                    timeout=120.0
                 )
                 
                 if response.status_code == 200:
@@ -146,7 +146,7 @@ SQL query:"""
                         "stream": False,
                         "temperature": 0.0,
                     },
-                    timeout=15.0
+                    timeout=120.0
                 )
 
                 if response.status_code == 200:
@@ -170,7 +170,7 @@ SQL query:"""
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{self.base_url}/api/tags",
-                    timeout=5.0
+                    timeout=120.0
                 )
                 return response.status_code == 200
         except:
