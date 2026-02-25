@@ -62,8 +62,11 @@ SQL query:"""
                         "system": system_prompt,
                         "stream": False,
                         "temperature": 0.0,
+                        "options": {
+                            "num_ctx": settings.OLLAMA_SQL_NUM_CTX,
+                        },
                     },
-                    timeout=120.0
+                    timeout=settings.OLLAMA_GENERATE_TIMEOUT_SEC
                 )
                 
                 if response.status_code == 200:
@@ -98,8 +101,11 @@ SQL query:"""
                     json={
                         "model": self.embedding_model,
                         "input": text,
+                        "options": {
+                            "num_ctx": settings.OLLAMA_EMBED_NUM_CTX,
+                        },
                     },
-                    timeout=120.0
+                    timeout=settings.OLLAMA_EMBED_TIMEOUT_SEC
                 )
                 
                 if response.status_code == 200:
@@ -145,8 +151,11 @@ SQL query:"""
                         "system": system,
                         "stream": False,
                         "temperature": 0.0,
+                        "options": {
+                            "num_ctx": settings.OLLAMA_SQL_NUM_CTX,
+                        },
                     },
-                    timeout=120.0
+                    timeout=settings.OLLAMA_CLASSIFY_TIMEOUT_SEC
                 )
 
                 if response.status_code == 200:

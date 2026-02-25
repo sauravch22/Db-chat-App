@@ -28,6 +28,15 @@ class Settings(BaseSettings):
     OLLAMA_LLM_MODEL: str = Field(default="mistral", alias="OLLAMA_LLM_MODEL")
     OLLAMA_EMBEDDING_MODEL: str = Field(default="nomic-embed-text", alias="OLLAMA_EMBEDDING_MODEL")
     
+    # Ollama Context and Timeout Settings
+    OLLAMA_SQL_NUM_CTX: int = Field(default=4096, alias="OLLAMA_SQL_NUM_CTX")
+    OLLAMA_EMBED_NUM_CTX: int = Field(default=2048, alias="OLLAMA_EMBED_NUM_CTX")
+    OLLAMA_CLASSIFY_NUM_CTX: int = Field(default=4096, alias="OLLAMA_CLASSIFY_NUM_CTX")
+    # CPU-only inference on 7B model is slow, need generous timeouts
+    OLLAMA_GENERATE_TIMEOUT_SEC: float = Field(default=300.0, alias="OLLAMA_GENERATE_TIMEOUT_SEC")
+    OLLAMA_EMBED_TIMEOUT_SEC: float = Field(default=180.0, alias="OLLAMA_EMBED_TIMEOUT_SEC")
+    OLLAMA_CLASSIFY_TIMEOUT_SEC: float = Field(default=120.0, alias="OLLAMA_CLASSIFY_TIMEOUT_SEC")
+    
     # Application
     APP_ENV: str = Field(default="development", alias="APP_ENV")
     DEBUG: bool = Field(default=True, alias="DEBUG")
