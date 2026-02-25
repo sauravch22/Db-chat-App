@@ -23,8 +23,8 @@ class Settings(BaseSettings):
     QDRANT_API_KEY: str = Field(default="your_qdrant_api_key_here", alias="QDRANT_API_KEY")
     QDRANT_COLLECTION: str = Field(default="dbchat_embeddings", alias="QDRANT_COLLECTION")
     
-    # Ollama LLM
-    OLLAMA_URL: str = Field(default="http://ollama:11434", alias="OLLAMA_URL")
+    # Ollama LLM (local with Metal GPU acceleration on M5 Mac)
+    OLLAMA_URL: str = Field(default="http://localhost:11434", alias="OLLAMA_URL")
     OLLAMA_LLM_MODEL: str = Field(default="mistral", alias="OLLAMA_LLM_MODEL")
     OLLAMA_EMBEDDING_MODEL: str = Field(default="nomic-embed-text", alias="OLLAMA_EMBEDDING_MODEL")
     
@@ -32,10 +32,10 @@ class Settings(BaseSettings):
     OLLAMA_SQL_NUM_CTX: int = Field(default=4096, alias="OLLAMA_SQL_NUM_CTX")
     OLLAMA_EMBED_NUM_CTX: int = Field(default=2048, alias="OLLAMA_EMBED_NUM_CTX")
     OLLAMA_CLASSIFY_NUM_CTX: int = Field(default=4096, alias="OLLAMA_CLASSIFY_NUM_CTX")
-    # CPU-only inference on 7B model is slow, need generous timeouts
-    OLLAMA_GENERATE_TIMEOUT_SEC: float = Field(default=300.0, alias="OLLAMA_GENERATE_TIMEOUT_SEC")
-    OLLAMA_EMBED_TIMEOUT_SEC: float = Field(default=180.0, alias="OLLAMA_EMBED_TIMEOUT_SEC")
-    OLLAMA_CLASSIFY_TIMEOUT_SEC: float = Field(default=120.0, alias="OLLAMA_CLASSIFY_TIMEOUT_SEC")
+    # Metal GPU acceleration on local Ollama (M5 MacBook) - much faster than CPU-only Docker
+    OLLAMA_GENERATE_TIMEOUT_SEC: float = Field(default=60.0, alias="OLLAMA_GENERATE_TIMEOUT_SEC")
+    OLLAMA_EMBED_TIMEOUT_SEC: float = Field(default=30.0, alias="OLLAMA_EMBED_TIMEOUT_SEC")
+    OLLAMA_CLASSIFY_TIMEOUT_SEC: float = Field(default=30.0, alias="OLLAMA_CLASSIFY_TIMEOUT_SEC")
     
     # Application
     APP_ENV: str = Field(default="development", alias="APP_ENV")

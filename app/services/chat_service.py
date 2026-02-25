@@ -10,6 +10,7 @@ import re
 from app.services.ollama_service import OllamaService
 from app.services.vector_service import VectorService
 from app.services.cache_service import CacheService
+from app.services.metadata_service import MetadataService
 from app.database import SessionLocal
 from app.models import Connection, Database, Table, Column
 
@@ -23,6 +24,7 @@ class ChatService:
         self.ollama = OllamaService()
         self.vector = VectorService()
         self.cache = CacheService()
+        self.metadata = MetadataService()
         self.db = SessionLocal()
     
     async def process_query(
@@ -82,37 +84,61 @@ class ChatService:
             logger.info(f"Embedding prompt: {user_prompt[:50]}...")
             prompt_embedding = await self.ollama.embed_text(user_prompt)
 
-            logger.info(f"Searching for top {top_k_tables} relevant tables for connection_id={connection_id}")
-            relevant_results = await self.vector.search(
-                embedding=prompt_embedding,
-                top_k=top_k_tables * 10,  # Increased to get both table and column results
-                filters={
-                    "must": [
-                        {"key": "connection_id", "match": {"value": connection_id}}
-                    ]
-                }
-            )
-
-            logger.info(f"Vector search returned {len(relevant_results)} results")
-            
-            # Extract unique table names from both table and column type results
+            logger.info("Fetching table summaries for v2 table selection")
+            table_summaries = self.metadata.get_table_summaries(connection_id)
             table_names = []
-            seen_tables = set()
-            
-            # First prioritize table-type results
-            for r in relevant_results:
-                if r.get("payload", {}).get("type") == "table":
+
+            if table_summaries:
+                allowed_tables = {t["name"] for t in table_summaries}
+                identified = await self.ollama.identify_tables(user_prompt, table_summaries)
+                identified = [t for t in identified if t in allowed_tables]
+                if identified:
+                    max_tables = max(top_k_tables, 5)
+                    identified = identified[:max_tables]
+                    summary_text = "\n".join([t["summary"] for t in table_summaries if t["name"] in identified])
+                    similarity = await self.ollama.verify_intent_similarity(prompt_embedding, summary_text)
+                    if similarity >= 0.35:
+                        table_names = identified
+                        logger.info(f"LLM table selection accepted (similarity={similarity:.2f}): {table_names}")
+                    else:
+                        logger.info(f"LLM table selection rejected (similarity={similarity:.2f}), falling back to vector search")
+
+            if not table_names:
+                logger.info(f"Searching for top {top_k_tables} relevant tables for connection_id={connection_id}")
+                relevant_results = await self.vector.search(
+                    embedding=prompt_embedding,
+                    top_k=top_k_tables * 10,
+                    filters={
+                        "must": [
+                            {"key": "connection_id", "match": {"value": connection_id}},
+                            {"key": "type", "match": {"value": "table"}}
+                        ]
+                    }
+                )
+
+                logger.info(f"Vector search returned {len(relevant_results)} results")
+                table_names = []
+                seen_tables = set()
+                for r in relevant_results:
                     table_name = r.get("payload", {}).get("table_name")
                     if table_name and table_name not in seen_tables:
                         table_names.append(table_name)
                         seen_tables.add(table_name)
                         if len(table_names) >= top_k_tables:
                             break
-            
-            # If we don't have enough tables, add from column-type results
-            if len(table_names) < top_k_tables:
-                for r in relevant_results:
-                    if r.get("payload", {}).get("type") == "column":
+
+                # If still not enough tables, fallback to mixed table+column search
+                if len(table_names) < top_k_tables:
+                    mixed_results = await self.vector.search(
+                        embedding=prompt_embedding,
+                        top_k=top_k_tables * 10,
+                        filters={
+                            "must": [
+                                {"key": "connection_id", "match": {"value": connection_id}}
+                            ]
+                        }
+                    )
+                    for r in mixed_results:
                         table_name = r.get("payload", {}).get("table_name")
                         if table_name and table_name not in seen_tables:
                             table_names.append(table_name)
@@ -130,7 +156,7 @@ class ChatService:
                 }
 
             logger.info(f"Fetching schema for {len(table_names)} relevant tables")
-            schema_context = await self._build_schema_context(
+            schema_context = self.metadata.get_column_schema(
                 connection_id,
                 table_names
             )
@@ -153,19 +179,15 @@ class ChatService:
             # Sanitize: replace MySQL-style backticks with PostgreSQL double-quotes
             sql = sql.replace('`', '"')
 
-            # Enforce exact table names: replace any pluralized/wrong variant with the real name.
-            # e.g. if schema has "genre" but LLM wrote "genres", replace it back.
-            import re as _re
-            for correct_name in table_names:
-                wrong_plural = correct_name + 's'
-                sql = _re.sub(
-                    r'\b' + _re.escape(wrong_plural) + r'\b',
-                    correct_name,
-                    sql,
-                    flags=_re.IGNORECASE
-                )
-
             logger.info(f"Generated SQL: {sql}")
+            identifier_error = self._verify_sql_identifiers(sql, schema_context)
+            if identifier_error:
+                return {
+                    "status": "error",
+                    "error": f"Invalid SQL: {identifier_error}",
+                    "sql": sql,
+                    "execution_time_ms": int((time.time() - start_time) * 1000)
+                }
             logger.info("Validating SQL")
             validation_error = self._validate_sql(sql)
             if validation_error:
@@ -186,6 +208,59 @@ class ChatService:
             exec_time = int((time.time() - exec_start) * 1000)
 
             if result.get("status") == "error":
+                error_text = result.get("error", "")
+                # Attempt a single repair pass using LLM with error context
+                should_repair = any(k in error_text for k in ["UndefinedColumn", "UndefinedTable", "unterminated quoted", "unterminated quoted string", "invalid reference"])
+                if should_repair:
+                    # Ask LLM to fix the SQL based on error message
+                    repair_prompt = (
+                        "The previous SQL failed. Fix the SQL using ONLY valid columns/tables from the schema.\n"
+                        f"Original question: {user_prompt}\n"
+                        f"Previous SQL: {sql}\n"
+                        f"Error: {error_text}\n"
+                        "Return a single corrected SELECT query only."
+                    )
+                    regenerated_sql = await self.ollama.generate_sql(
+                        user_prompt=repair_prompt,
+                        schema_context=schema_context,
+                        sample_info=sample_info
+                    )
+                    regenerated_sql = regenerated_sql.replace('`', '"')
+
+                    identifier_error = self._verify_sql_identifiers(regenerated_sql, schema_context)
+                    if identifier_error:
+                        return {
+                            "status": "error",
+                            "error": f"Invalid SQL: {identifier_error}",
+                            "sql": regenerated_sql,
+                            "execution_time_ms": int((time.time() - start_time) * 1000)
+                        }
+                    validation_error = self._validate_sql(regenerated_sql)
+                    if not validation_error:
+                        retry_result = await self._execute_query(
+                            connection=connection,
+                            sql=regenerated_sql,
+                            timeout=timeout
+                        )
+                        if retry_result.get("status") == "success":
+                            answer = await self._format_answer(
+                                user_prompt=user_prompt,
+                                sql=regenerated_sql,
+                                rows=retry_result["rows"],
+                                columns=retry_result["columns"],
+                                row_count=retry_result["row_count"]
+                            )
+                            return {
+                                "status": "success",
+                                "answer": answer,
+                                "sql": regenerated_sql,
+                                "rows": retry_result["rows"],
+                                "columns": retry_result["columns"],
+                                "row_count": retry_result["row_count"],
+                                "execution_time_ms": int((time.time() - start_time) * 1000),
+                                "query_time_ms": exec_time
+                            }
+
                 return {
                     **result,
                     "sql": sql,
@@ -345,7 +420,17 @@ class ChatService:
             _known_tables_set = set(_known_tables_list)
             _prompt_words = set(re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', lower))
             # Tables explicitly mentioned in the prompt (preserves metadata order)
-            _mentioned_tables = [t for t in _known_tables_list if t in _prompt_words]
+            # Includes simple plural matches (albums -> album, employees -> employee)
+            _mentioned_tables = []
+            for t in _known_tables_list:
+                if t in _prompt_words:
+                    _mentioned_tables.append(t)
+                    continue
+                if t.endswith("y") and f"{t[:-1]}ies" in _prompt_words:
+                    _mentioned_tables.append(t)
+                    continue
+                if f"{t}s" in _prompt_words:
+                    _mentioned_tables.append(t)
 
             _list_tables_phrases = [
                 "list tables", "show tables", "all tables", "what tables",
@@ -508,6 +593,82 @@ class ChatService:
                 return f"Command '{cmd}' is not allowed"
         return None
 
+    def _verify_sql_identifiers(self, sql: str, schema_context: str) -> Optional[str]:
+        """Verify tables and qualified columns exist in schema context."""
+        if not sql or not schema_context:
+            return None
+
+        table_columns: Dict[str, List[str]] = {}
+        current_table = None
+        in_columns_section = False
+        for line in schema_context.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("Table:"):
+                current_table = stripped.split("Table:", 1)[1].strip()
+                table_columns[current_table] = []
+                in_columns_section = False
+            elif stripped.startswith("Columns:"):
+                in_columns_section = True
+                # Check if columns are on the same line (old format)
+                cols_after = stripped.split("Columns:", 1)[1].strip()
+                if cols_after:
+                    col_names = []
+                    for part in cols_after.split(","):
+                        part = part.strip()
+                        if not part:
+                            continue
+                        col_name = part.split("(", 1)[0].strip()
+                        if col_name:
+                            col_names.append(col_name)
+                    if current_table:
+                        table_columns[current_table] = col_names
+                    in_columns_section = False
+            elif in_columns_section and current_table and line and not line[0].isspace() is False:
+                # Column definition on separate line (new enhanced format)
+                if ":" in stripped and not stripped.startswith("Foreign") and not stripped.startswith("Join"):
+                    col_name = stripped.split(":")[0].strip()
+                    if col_name and not col_name.startswith("-"):
+                        table_columns[current_table].append(col_name)
+                elif stripped.startswith("Foreign") or stripped.startswith("Join"):
+                    in_columns_section = False
+
+        if not table_columns:
+            return None
+
+        def _strip_quotes(name: str) -> str:
+            return name.strip('"').strip('`')
+
+        alias_map: Dict[str, str] = {}
+
+        for match in re.finditer(r"\bFROM\s+([^\s,]+)(?:\s+(?:AS\s+)?(\w+))?", sql, flags=re.IGNORECASE):
+            table_token = match.group(1)
+            alias = match.group(2)
+            if table_token.startswith("("):
+                continue
+            table_name = _strip_quotes(table_token.split(".")[-1])
+            if alias:
+                alias_map[alias] = table_name
+
+        for match in re.finditer(r"\bJOIN\s+([^\s,]+)(?:\s+(?:AS\s+)?(\w+))?", sql, flags=re.IGNORECASE):
+            table_token = match.group(1)
+            alias = match.group(2)
+            if table_token.startswith("("):
+                continue
+            table_name = _strip_quotes(table_token.split(".")[-1])
+            if alias:
+                alias_map[alias] = table_name
+
+        for match in re.finditer(r"\b([A-Za-z_][\w]*)\.([A-Za-z_][\w]*)\b", sql):
+            table_token = match.group(1)
+            col_token = match.group(2)
+            table_name = alias_map.get(table_token, table_token)
+            if table_name not in table_columns:
+                continue
+            if col_token not in table_columns[table_name]:
+                return f"Unknown column '{table_token}.{col_token}'"
+
+        return None
+
     async def _execute_query(
         self,
         connection: Connection,
@@ -568,6 +729,8 @@ class ChatService:
     def close(self):
         if self.db:
             self.db.close()
+        if self.metadata:
+            self.metadata.close()
 
     def __del__(self):
         self.close()

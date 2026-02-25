@@ -54,7 +54,12 @@ async def _extract_and_index_database(
         result = await indexing_service.index_schema(
             connection_id=connection_id,
             database_name=database,
-            schema_data=schema_data
+            schema_data=schema_data,
+            db_type=db_type,
+            host=host,
+            port=port,
+            username=username,
+            password=password
         )
         
         logger.info(f"Indexing completed: {result}")

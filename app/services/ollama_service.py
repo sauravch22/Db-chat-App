@@ -53,6 +53,8 @@ User Question: {user_prompt}
 SQL query:"""
         
         try:
+            logger.debug(f"SQL generation: model={self.llm_model}, base_url={self.base_url}")
+            
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{self.base_url}/api/generate",
@@ -69,6 +71,7 @@ SQL query:"""
                     timeout=settings.OLLAMA_GENERATE_TIMEOUT_SEC
                 )
                 
+                logger.debug(f"SQL generation response status: {response.status_code}")
                 if response.status_code == 200:
                     result = response.json()
                     sql = result.get("response", "").strip()
@@ -82,29 +85,125 @@ SQL query:"""
                     # Strip trailing explanation after the semicolon
                     if ";" in sql:
                         sql = sql[:sql.index(";") + 1]
-                    return sql.strip()
+                    # CRITICAL FIX: Remove trailing quotes that LLM sometimes adds
+                    sql = sql.rstrip('"').rstrip("'").strip()
+                    return sql
                 else:
-                    logger.error(f"Ollama error: {response.text}")
+                    logger.error(f"Ollama error (status {response.status_code}): {response.text}")
                     raise Exception(f"Ollama returned status code {response.status_code}")
         
         except Exception as e:
             logger.error(f"Error generating SQL: {str(e)}")
             raise
+
+    async def identify_tables(self, user_prompt: str, table_summaries: list) -> list:
+        """Identify relevant tables from provided summaries. Returns list of exact table names."""
+        if not table_summaries:
+            return []
+
+        summaries_text = "\n".join(
+            [f"- {t['name']}: {t['summary']}" for t in table_summaries]
+        )
+
+        system_prompt = (
+            "You are a database table selector. "
+            "Given a user question and a list of table summaries, return a JSON array "
+            "of the exact table names that are required to answer the question. "
+            "ONLY use names from the provided list. Return JSON only."
+        )
+
+        prompt = (
+            f"User Question: {user_prompt}\n\n"
+            f"Available Tables:\n{summaries_text}\n\n"
+            "Return JSON array of table names (e.g., [\"invoice\", \"customer\"])."
+        )
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.base_url}/api/generate",
+                    json={
+                        "model": self.llm_model,
+                        "prompt": prompt,
+                        "system": system_prompt,
+                        "stream": False,
+                        "temperature": 0.0,
+                        "options": {
+                            "num_ctx": settings.OLLAMA_SQL_NUM_CTX,
+                        },
+                    },
+                    timeout=settings.OLLAMA_GENERATE_TIMEOUT_SEC
+                )
+
+                if response.status_code != 200:
+                    logger.error(f"Ollama identify_tables error (status {response.status_code}): {response.text}")
+                    return []
+
+                result = response.json()
+                raw = result.get("response", "").strip()
+                raw = raw.replace("```json", "").replace("```", "").strip()
+
+                # Try direct JSON parse
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, list):
+                        return [str(t) for t in parsed]
+                except json.JSONDecodeError:
+                    pass
+
+                # Fallback: extract JSON array from text
+                start = raw.find("[")
+                end = raw.rfind("]")
+                if start != -1 and end != -1 and end > start:
+                    try:
+                        parsed = json.loads(raw[start:end + 1])
+                        if isinstance(parsed, list):
+                            return [str(t) for t in parsed]
+                    except json.JSONDecodeError:
+                        return []
+
+                return []
+        except Exception as e:
+            logger.error(f"Error identifying tables: {str(e)}")
+            return []
+
+    async def verify_intent_similarity(self, prompt_embedding: list, table_summary_text: str) -> float:
+        """Compute cosine similarity between prompt embedding and selected table summary embedding."""
+        if not table_summary_text:
+            return 1.0
+        try:
+            summary_embedding = await self.embed_text(table_summary_text)
+            return self._cosine_similarity(prompt_embedding, summary_embedding)
+        except Exception as e:
+            logger.error(f"Error verifying intent similarity: {str(e)}")
+            return 0.0
+
+    def _cosine_similarity(self, a: list, b: list) -> float:
+        if not a or not b or len(a) != len(b):
+            return 0.0
+        dot = sum(x * y for x, y in zip(a, b))
+        norm_a = sum(x * x for x in a) ** 0.5
+        norm_b = sum(y * y for y in b) ** 0.5
+        if norm_a == 0.0 or norm_b == 0.0:
+            return 0.0
+        return dot / (norm_a * norm_b)
     
     async def embed_text(self, text: str) -> list:
         """Generate embedding for text"""
         
         try:
+            payload = {
+                "model": self.embedding_model,
+                "input": text,
+                "options": {
+                    "num_ctx": settings.OLLAMA_EMBED_NUM_CTX,
+                },
+            }
+            
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{self.base_url}/api/embed",
-                    json={
-                        "model": self.embedding_model,
-                        "input": text,
-                        "options": {
-                            "num_ctx": settings.OLLAMA_EMBED_NUM_CTX,
-                        },
-                    },
+                    json=payload,
                     timeout=settings.OLLAMA_EMBED_TIMEOUT_SEC
                 )
                 
@@ -112,7 +211,7 @@ SQL query:"""
                     result = response.json()
                     return result.get("embeddings", [[]])[0]
                 else:
-                    logger.error(f"Ollama embedding error: {response.text}")
+                    logger.error(f"Ollama embedding error (status {response.status_code}): {response.text}")
                     raise Exception(f"Ollama returned status code {response.status_code}")
         
         except Exception as e:
@@ -142,6 +241,8 @@ SQL query:"""
         )
 
         try:
+            logger.debug(f"Classify intent: model={self.llm_model}, base_url={self.base_url}")
+            
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{self.base_url}/api/generate",
@@ -158,6 +259,7 @@ SQL query:"""
                     timeout=settings.OLLAMA_CLASSIFY_TIMEOUT_SEC
                 )
 
+                logger.debug(f"Classify response status: {response.status_code}")
                 if response.status_code == 200:
                     result = response.json()
                     out = result.get("response", "").strip().lower()
@@ -165,7 +267,7 @@ SQL query:"""
                         return "catalog"
                     return "data"
                 else:
-                    logger.error(f"Ollama classify error: {response.text}")
+                    logger.error(f"Ollama classify error (status {response.status_code}): {response.text}")
                     return "data"
 
         except Exception as e:
