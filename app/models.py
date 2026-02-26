@@ -59,6 +59,9 @@ class Table(Base):
     sample_count = SA_Column(Integer, default=0)
     is_indexed = SA_Column(Boolean, default=False)
     last_indexed_at = SA_Column(DateTime)
+    summary = SA_Column(Text)  # v2: Natural language table summary
+    summary_generated_at = SA_Column(DateTime)  # v2: When summary was generated
+    summary_human_override = SA_Column(Boolean, default=False)  # v2: True if human edited summary
     created_at = SA_Column(DateTime, default=datetime.utcnow)
     updated_at = SA_Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
@@ -112,3 +115,24 @@ class Query(Base):
     created_at = SA_Column(DateTime, default=datetime.utcnow)
     
     connection = relationship("Connection", back_populates="queries")
+
+
+class DataEmbeddingRefreshLog(Base):
+    """Track data embedding refresh status per column"""
+    __tablename__ = "data_embedding_refresh_log"
+    
+    id = SA_Column(Integer, primary_key=True)
+    connection_id = SA_Column(Integer, ForeignKey("connections.id", ondelete="CASCADE"), nullable=False)
+    table_id = SA_Column(Integer, ForeignKey("tables.id", ondelete="CASCADE"), nullable=False)
+    column_id = SA_Column(Integer, ForeignKey("columns.id", ondelete="CASCADE"), nullable=False)
+    last_sampled_at = SA_Column(DateTime)  # When data was last sampled
+    sample_count = SA_Column(Integer, default=0)  # Number of distinct values sampled
+    refresh_status = SA_Column(String(50), default="pending")  # pending, in_progress, completed, failed
+    error_message = SA_Column(Text)  # Error details if failed
+    next_refresh_at = SA_Column(DateTime)  # Scheduled refresh time
+    created_at = SA_Column(DateTime, default=datetime.utcnow)
+    updated_at = SA_Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    connection = relationship("Connection")
+    table = relationship("Table")
+    column = relationship("Column")
