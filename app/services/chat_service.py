@@ -146,7 +146,11 @@ class ChatService:
                             if len(table_names) >= top_k_tables:
                                 break
 
-            logger.info(f"Selected {len(table_names)} unique tables: {table_names}")
+            logger.info(f"\n{'='*80}")
+            logger.info(f"SELECTED TABLES: {table_names}")
+            logger.info(f"Number of tables selected: {len(table_names)}")
+            logger.info(f"{'='*80}\n")
+            
             if not table_names:
                 logger.warning(f"No relevant tables found for prompt: {user_prompt}")
                 return {
@@ -167,36 +171,126 @@ class ChatService:
                     "error": "Failed to fetch schema context",
                     "execution_time_ms": int((time.time() - start_time) * 1000)
                 }
+            
+            logger.info(f"\n{'='*80}")
+            logger.info(f"SCHEMA CONTEXT (length: {len(schema_context)} chars):")
+            logger.info(f"{'='*80}")
+            logger.info(schema_context)
+            logger.info(f"{'='*80}\n")
 
-            logger.info("Generating SQL with Ollama")
+            logger.info(f"\n{'='*80}")
+            logger.info("GENERATING SQL WITH OLLAMA")
+            logger.info(f"User Prompt: {user_prompt}")
+            logger.info(f"{'='*80}\n")
+            
             sample_info = "Sample tables available with realistic data patterns"
-            sql = await self.ollama.generate_sql(
-                user_prompt=user_prompt,
-                schema_context=schema_context,
-                sample_info=sample_info
-            )
+            
+            # Use reasoning mode if enabled (Phase 3 enhancement)
+            from app.config import Settings
+            settings = Settings()
+            use_reasoning = settings.USE_REASONING_MODE
+            logger.info(f"USE_REASONING_MODE: {use_reasoning}")
+            
+            reasoning = ""
+            if use_reasoning:
+                logger.info("Using two-step reasoning mode")
+                reasoning, sql = await self.ollama.generate_sql_with_reasoning(
+                    user_prompt=user_prompt,
+                    schema_context=schema_context,
+                    sample_info=sample_info
+                )
+                logger.info(f"\n{'='*80}")
+                logger.info(f"FULL REASONING:\n{reasoning}")
+                logger.info(f"{'='*80}\n")
+            else:
+                logger.info("Using direct SQL generation")
+                sql = await self.ollama.generate_sql(
+                    user_prompt=user_prompt,
+                    schema_context=schema_context,
+                    sample_info=sample_info
+                )
 
             # Sanitize: replace MySQL-style backticks with PostgreSQL double-quotes
             sql = sql.replace('`', '"')
 
-            logger.info(f"Generated SQL: {sql}")
+            logger.info(f"\n{'='*80}")
+            logger.info(f"GENERATED SQL:")
+            logger.info(f"{'='*80}")
+            logger.info(sql)
+            logger.info(f"{'='*80}\n")
+
+            async def _regenerate_sql_with_error(error_text: str) -> Optional[str]:
+                # Create enhanced schema context with prominent error information
+                enhanced_context = (
+                    f"!!! CRITICAL ERROR TO FIX !!!\n"
+                    f"The previous SQL query failed with this error:\n"
+                    f"{error_text}\n\n"
+                    f"PREVIOUS SQL THAT FAILED:\n{sql}\n\n"
+                    f"ORIGINAL USER QUESTION: {user_prompt}\n\n"
+                    f"{'=' * 80}\n"
+                    f"AVAILABLE SCHEMA (use ONLY these tables/columns):\n"
+                    f"{schema_context}\n"
+                    f"{'=' * 80}\n\n"
+                    f"INSTRUCTIONS:\n"
+                    f"1. If error mentions 'Unknown column': Use ONLY columns shown in COLUMNS section of schema\n"
+                    f"2. If error mentions 'Unknown table': Use ONLY tables with '=== TABLE:' headers in schema\n"
+                    f"3. Always use table.column format (table-qualified names)\n"
+                    f"4. Use GLOBAL FOREIGN KEY RELATIONSHIPS for joins\n"
+                    f"5. Every table in SELECT/WHERE/GROUP BY/ORDER BY must be in FROM or JOIN clause\n"
+                    f"6. If you JOIN a subquery/CTE, include the join key columns in its SELECT list\n"
+                    f"7. For per-entity totals vs average, compute per-entity aggregates first, then compare to AVG of those aggregates\n"
+                )
+                repair_prompt = f"Fix the failed SQL query to answer: {user_prompt}"
+                
+                regenerated = await self.ollama.generate_sql(
+                    user_prompt=repair_prompt,
+                    schema_context=enhanced_context,
+                    sample_info=sample_info
+                )
+                return regenerated.replace('`', '"') if regenerated else None
+
             identifier_error = self._verify_sql_identifiers(sql, schema_context)
             if identifier_error:
-                return {
-                    "status": "error",
-                    "error": f"Invalid SQL: {identifier_error}",
-                    "sql": sql,
-                    "execution_time_ms": int((time.time() - start_time) * 1000)
-                }
+                logger.warning(f"\nIDENTIFIER VALIDATION ERROR: {identifier_error}")
+                logger.info(f"Attempting to regenerate SQL...\n")
+                regenerated_sql = await _regenerate_sql_with_error(identifier_error)
+                if regenerated_sql:
+                    logger.info(f"\n{'='*80}")
+                    logger.info(f"REGENERATED SQL (after error):")
+                    logger.info(f"{'='*80}")
+                    logger.info(regenerated_sql)
+                    logger.info(f"{'='*80}\n")
+                    identifier_error = self._verify_sql_identifiers(regenerated_sql, schema_context)
+                    if not identifier_error:
+                        sql = regenerated_sql
+                if identifier_error:
+                    logger.error(f"\nFINAL ERROR - Could not fix identifier issues: {identifier_error}")
+                    return {
+                        "status": "error",
+                        "error": f"Invalid SQL: {identifier_error}",
+                        "sql": sql,
+                        "execution_time_ms": int((time.time() - start_time) * 1000),
+                        "selected_tables": table_names,
+                        "schema_context": schema_context
+                    }
+
             logger.info("Validating SQL")
             validation_error = self._validate_sql(sql)
             if validation_error:
-                return {
-                    "status": "error",
-                    "error": f"Invalid SQL: {validation_error}",
-                    "sql": sql,
-                    "execution_time_ms": int((time.time() - start_time) * 1000)
-                }
+                regenerated_sql = await _regenerate_sql_with_error(validation_error)
+                if regenerated_sql:
+                    validation_error = self._validate_sql(regenerated_sql)
+                    if not validation_error:
+                        sql = regenerated_sql
+                if validation_error:
+                    return {
+                        "status": "error",
+                        "error": f"Invalid SQL: {validation_error}",
+                        "sql": sql,
+                        "execution_time_ms": int((time.time() - start_time) * 1000),
+                        "selected_tables": table_names,
+                        "schema_context": schema_context
+                    }
 
             logger.info("Executing query on user database")
             exec_start = time.time()
@@ -210,62 +304,120 @@ class ChatService:
             if result.get("status") == "error":
                 error_text = result.get("error", "")
                 # Attempt a single repair pass using LLM with error context
-                should_repair = any(k in error_text for k in ["UndefinedColumn", "UndefinedTable", "unterminated quoted", "unterminated quoted string", "invalid reference"])
+                should_repair = any(k in error_text for k in [
+                    "UndefinedColumn",
+                    "UndefinedTable",
+                    "AmbiguousColumn",
+                    "GroupingError",
+                    "CardinalityViolation",
+                    "unterminated quoted",
+                    "unterminated quoted string",
+                    "invalid reference"
+                ])
                 if should_repair:
-                    # Ask LLM to fix the SQL based on error message
-                    repair_prompt = (
-                        "The previous SQL failed. Fix the SQL using ONLY valid columns/tables from the schema.\n"
-                        f"Original question: {user_prompt}\n"
-                        f"Previous SQL: {sql}\n"
-                        f"Error: {error_text}\n"
-                        "Return a single corrected SELECT query only."
-                    )
-                    regenerated_sql = await self.ollama.generate_sql(
-                        user_prompt=repair_prompt,
-                        schema_context=schema_context,
-                        sample_info=sample_info
-                    )
-                    regenerated_sql = regenerated_sql.replace('`', '"')
+                    current_sql = sql
+                    current_error = error_text
+                    last_retry_result = None
 
-                    identifier_error = self._verify_sql_identifiers(regenerated_sql, schema_context)
-                    if identifier_error:
-                        return {
-                            "status": "error",
-                            "error": f"Invalid SQL: {identifier_error}",
-                            "sql": regenerated_sql,
-                            "execution_time_ms": int((time.time() - start_time) * 1000)
-                        }
-                    validation_error = self._validate_sql(regenerated_sql)
-                    if not validation_error:
-                        retry_result = await self._execute_query(
+                    for _ in range(2):
+                        # Ask LLM to fix the SQL based on error message
+                        # Enhance schema context with prominent error information
+                        enhanced_context = (
+                            f"!!! CRITICAL ERROR TO FIX !!!\n"
+                            f"The previous SQL query failed with this error:\n"
+                            f"{current_error}\n\n"
+                            f"PREVIOUS SQL THAT FAILED:\n{current_sql}\n\n"
+                            f"ORIGINAL USER QUESTION: {user_prompt}\n\n"
+                            f"{'=' * 80}\n"
+                            f"AVAILABLE SCHEMA (use ONLY these tables/columns):\n"
+                            f"{schema_context}\n"
+                            f"{'=' * 80}\n\n"
+                            f"INSTRUCTIONS:\n"
+                            f"1. If error mentions 'column does not exist' or 'UndefinedColumn': Use ONLY columns listed in schema above\n"
+                            f"2. If error mentions 'missing FROM-clause' or 'UndefinedTable': Add missing table to FROM/JOIN\n"
+                            f"3. If error mentions 'ambiguous column': Always use table.column format (never unqualified)\n"
+                            f"4. If error mentions 'more than one row' or 'CardinalityViolation': Subquery must return single value, add LIMIT 1 or aggregate\n"
+                            f"5. If error mentions 'syntax error': Check SQL syntax carefully, proper parentheses, valid keywords\n"
+                            f"6. Use GLOBAL FOREIGN KEY RELATIONSHIPS shown in schema for joins\n"
+                            f"7. If you JOIN a subquery/CTE, include the join key columns in its SELECT list\n"
+                            f"8. For per-entity totals vs average, compute per-entity aggregates first, then compare to AVG of those aggregates\n"
+                        )
+                        repair_prompt = f"Fix the failed SQL query to answer: {user_prompt}"
+
+                        regenerated_sql = await self.ollama.generate_sql(
+                            user_prompt=repair_prompt,
+                            schema_context=enhanced_context,
+                            sample_info=sample_info
+                        )
+                        regenerated_sql = regenerated_sql.replace('`', '"')
+
+                        identifier_error = self._verify_sql_identifiers(regenerated_sql, schema_context)
+                        if identifier_error:
+                            return {
+                                "status": "error",
+                                "error": f"Invalid SQL: {identifier_error}",
+                                "sql": regenerated_sql,
+                                "execution_time_ms": int((time.time() - start_time) * 1000),
+                                "selected_tables": table_names,
+                                "schema_context": schema_context
+                            }
+                        validation_error = self._validate_sql(regenerated_sql)
+                        if validation_error:
+                            return {
+                                "status": "error",
+                                "error": f"Invalid SQL: {validation_error}",
+                                "sql": regenerated_sql,
+                                "execution_time_ms": int((time.time() - start_time) * 1000),
+                                "selected_tables": table_names,
+                                "schema_context": schema_context
+                            }
+
+                        last_retry_result = await self._execute_query(
                             connection=connection,
                             sql=regenerated_sql,
                             timeout=timeout
                         )
-                        if retry_result.get("status") == "success":
+                        if last_retry_result.get("status") == "success":
                             answer = await self._format_answer(
                                 user_prompt=user_prompt,
                                 sql=regenerated_sql,
-                                rows=retry_result["rows"],
-                                columns=retry_result["columns"],
-                                row_count=retry_result["row_count"]
+                                rows=last_retry_result["rows"],
+                                columns=last_retry_result["columns"],
+                                row_count=last_retry_result["row_count"]
                             )
                             return {
                                 "status": "success",
                                 "answer": answer,
                                 "sql": regenerated_sql,
-                                "rows": retry_result["rows"],
-                                "columns": retry_result["columns"],
-                                "row_count": retry_result["row_count"],
+                                "rows": last_retry_result["rows"],
+                                "columns": last_retry_result["columns"],
+                                "row_count": last_retry_result["row_count"],
                                 "execution_time_ms": int((time.time() - start_time) * 1000),
                                 "query_time_ms": exec_time
                             }
 
-                return {
+                        current_sql = regenerated_sql
+                        current_error = last_retry_result.get("error", "")
+
+                    if last_retry_result:
+                        return {
+                            **last_retry_result,
+                            "sql": current_sql,
+                            "execution_time_ms": int((time.time() - start_time) * 1000),
+                            "selected_tables": table_names,
+                            "schema_context": schema_context
+                        }
+
+                error_response = {
                     **result,
                     "sql": sql,
-                    "execution_time_ms": int((time.time() - start_time) * 1000)
+                    "execution_time_ms": int((time.time() - start_time) * 1000),
+                    # Debug info
+                    "selected_tables": table_names,
+                    "schema_context": schema_context
                 }
+                logger.info(f"Returning error response with selected_tables={table_names}, schema_context_len={len(schema_context) if schema_context else 0}")
+                return error_response
 
             logger.info(f"Formatting {result['row_count']} result rows")
             answer = await self._format_answer(
@@ -284,7 +436,10 @@ class ChatService:
                 "columns": result["columns"],
                 "row_count": result["row_count"],
                 "execution_time_ms": int((time.time() - start_time) * 1000),
-                "query_time_ms": exec_time
+                "query_time_ms": exec_time,
+                # Debug info
+                "selected_tables": table_names,
+                "schema_context": schema_context
             }
         except Exception as e:
             logger.error(f"Error processing query: {str(e)}", exc_info=True)
@@ -607,10 +762,14 @@ class ChatService:
                 current_table = stripped.split("Table:", 1)[1].strip()
                 table_columns[current_table] = []
                 in_columns_section = False
-            elif stripped.startswith("Columns:"):
+            elif stripped.startswith("=== TABLE:"):
+                current_table = stripped.split("=== TABLE:", 1)[1].strip("= ")
+                table_columns[current_table] = []
+                in_columns_section = False
+            elif stripped.startswith("Columns:") or stripped.startswith("COLUMNS:"):
                 in_columns_section = True
                 # Check if columns are on the same line (old format)
-                cols_after = stripped.split("Columns:", 1)[1].strip()
+                cols_after = stripped.split(":", 1)[1].strip()
                 if cols_after:
                     col_names = []
                     for part in cols_after.split(","):
@@ -626,9 +785,14 @@ class ChatService:
             elif in_columns_section and current_table and line and not line[0].isspace() is False:
                 # Column definition on separate line (new enhanced format)
                 if ":" in stripped and not stripped.startswith("Foreign") and not stripped.startswith("Join"):
-                    col_name = stripped.split(":")[0].strip()
-                    if col_name and not col_name.startswith("-"):
-                        table_columns[current_table].append(col_name)
+                    col_token = stripped.split(":", 1)[0].strip()
+                    if col_token and not col_token.startswith("-"):
+                        if "." in col_token:
+                            table_part, col_part = col_token.split(".", 1)
+                            if table_part == current_table:
+                                table_columns[current_table].append(col_part)
+                        else:
+                            table_columns[current_table].append(col_token)
                 elif stripped.startswith("Foreign") or stripped.startswith("Join"):
                     in_columns_section = False
 
@@ -725,6 +889,101 @@ class ChatService:
         except Exception as e:
             logger.error(f"Error formatting answer: {str(e)}")
             return f"Query returned {row_count} rows."
+
+    async def execute_query(
+        self,
+        connection_id: int,
+        sql: str,
+        timeout: int = 30
+    ) -> Dict[str, Any]:
+        """
+        Execute a SQL query on a connected database
+        
+        Args:
+            connection_id: ID of the database connection
+            sql: SQL query to execute
+            timeout: Query timeout in seconds
+        
+        Returns:
+            Dictionary with success status, columns, rows, and execution time
+        """
+        start_time = time.time()
+        
+        try:
+            # Validate SQL - only SELECT allowed
+            sql_upper = sql.strip().upper()
+            if not sql_upper.startswith('SELECT'):
+                return {
+                    "success": False,
+                    "error": "Only SELECT queries are allowed",
+                    "execution_time_ms": int((time.time() - start_time) * 1000)
+                }
+            
+            # Get connection from database
+            connection = self.db.query(Connection).filter(
+                Connection.id == connection_id,
+                Connection.is_active == True
+            ).first()
+            
+            if not connection:
+                return {
+                    "success": False,
+                    "error": f"Connection {connection_id} not found or inactive",
+                    "execution_time_ms": int((time.time() - start_time) * 1000)
+                }
+            
+            # Build connection string
+            if connection.database_type.lower() == "postgres":
+                conn_string = f"postgresql://{connection.username}:{connection.password}@{connection.host}:{connection.port}/{connection.database}"
+            elif connection.database_type.lower() == "mysql":
+                conn_string = f"mysql+pymysql://{connection.username}:{connection.password}@{connection.host}:{connection.port}/{connection.database}"
+            else:
+                return {
+                    "success": False,
+                    "error": f"Unsupported database type: {connection.database_type}",
+                    "execution_time_ms": int((time.time() - start_time) * 1000)
+                }
+            
+            # Execute query
+            exec_start = time.time()
+            engine = create_engine(
+                conn_string,
+                poolclass=NullPool,
+                connect_args={"connect_timeout": timeout} if connection.database_type.lower() == "postgres" else {}
+            )
+            
+            logger.info(f"Executing query on {connection.database_type} database")
+            with engine.connect() as conn:
+                result = conn.execute(text(sql))
+                rows = result.fetchall()
+                columns = list(result.keys())
+                
+                # Convert rows to dictionaries
+                rows_as_dicts = [dict(zip(columns, row)) for row in rows]
+            
+            engine.dispose()
+            exec_time = int((time.time() - exec_start) * 1000)
+            
+            # Add column metadata
+            columns_with_type = [{"name": col, "type": "string"} for col in columns]
+            
+            logger.info(f"Query executed in {exec_time}ms, returned {len(rows_as_dicts)} rows")
+            
+            return {
+                "success": True,
+                "columns": columns_with_type,
+                "rows": rows_as_dicts,
+                "row_count": len(rows_as_dicts),
+                "execution_time_ms": exec_time
+            }
+        
+        except Exception as e:
+            logger.error(f"Error executing query: {str(e)}", exc_info=True)
+            return {
+                "success": False,
+                "error": f"Query execution failed: {str(e)}",
+                "execution_time_ms": int((time.time() - start_time) * 1000)
+            }
 
     def close(self):
         if self.db:

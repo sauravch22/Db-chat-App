@@ -13,6 +13,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.pool import NullPool
 from app.database import SessionLocal
 from app.models import Database, Table, Column
+from app.models import ForeignKeyModel as ForeignKey
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +138,39 @@ class IndexingService:
                     connect_args=connect_args
                 )
             
+            # Extract foreign keys using SQLAlchemy inspector
+            fk_map = {}
+            if data_engine is not None:
+                try:
+                    fk_map = SchemaExtractor.get_foreign_keys(data_engine)
+                    logger.info(f"Extracted {sum(len(v) for v in fk_map.values())} foreign keys")
+                except Exception as e:
+                    logger.warning(f"Could not extract FKs: {e}")
+            
+            # Delete existing FK records for this database (to handle schema changes)
+            db.query(ForeignKey).filter(ForeignKey.database_id == database.id).delete()
+            db.flush()
+            logger.info(f"Cleared existing FK records for database {database_name}")
+            
+            # Store FK relationships in database
+            fk_count = 0
+            for table_name, table_fks in fk_map.items():
+                for col_name, fk_info in table_fks.items():
+                    fk_record = ForeignKey(
+                        database_id=database.id,
+                        table_name=table_name,
+                        column_name=col_name,
+                        referenced_table=fk_info.get("references_table"),
+                        referenced_column=fk_info.get("references_column"),
+                        constraint_name=fk_info.get("constraint_name")
+                    )
+                    db.add(fk_record)
+                    fk_count += 1
+            
+            if fk_count > 0:
+                db.flush()
+                logger.info(f"Stored {fk_count} FK relationships in database")
+            
             for table in tables:
                 table_name = table["name"]
                 columns = table.get("columns", [])
@@ -214,6 +248,9 @@ class IndexingService:
                         )
                         db.add(col_record)
                         db.flush()
+                    
+                    # Set primary key flag from schema
+                    col_record.is_primary_key = column.get("primary_key", False)
                     
                     col_text = f"Column: {col_name} in table {table_name}. Type: {col_type}. Nullable: {col_nullable}"
                     

@@ -1,11 +1,12 @@
 """Chat API endpoints"""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import logging
 
 from app.services.chat_service import ChatService
+from app.api.deps import require_permission
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +31,16 @@ class ChatResponse(BaseModel):
     execution_time_ms: int
     query_time_ms: Optional[int] = None
     error: Optional[str] = None
+    # Debug fields
+    selected_tables: Optional[List[str]] = None
+    schema_context: Optional[str] = None
 
 
 @router.post("", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(
+    request: ChatRequest,
+    user: dict = Depends(require_permission("prompt_query")),
+):
     """
     Chat endpoint - Process natural language query
     
@@ -78,7 +85,10 @@ async def chat(request: ChatRequest):
                 row_count=result.get("row_count"),
                 execution_time_ms=result.get("execution_time_ms", 0),
                 query_time_ms=result.get("query_time_ms"),
-                error=result.get("error")
+                error=result.get("error"),
+                # Debug fields
+                selected_tables=result.get("selected_tables"),
+                schema_context=result.get("schema_context")
             )
         
         finally:
@@ -87,3 +97,68 @@ async def chat(request: ChatRequest):
     except Exception as e:
         logger.error(f"Chat endpoint error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class ExecuteRequest(BaseModel):
+    """Execute query request model"""
+    connection_id: int
+    sql: str
+
+
+class ExecuteResponse(BaseModel):
+    """Execute query response model"""
+    success: bool
+    columns: List[Dict[str, str]] = []
+    data: List[Dict[str, Any]] = []
+    row_count: int = 0
+    execution_time_ms: int = 0
+    error: Optional[str] = None
+
+
+@router.post("/execute", response_model=ExecuteResponse)
+async def execute_query(
+    request: ExecuteRequest,
+    user: dict = Depends(require_permission("prompt_query")),
+):
+    """
+    Execute a SQL query on the connected database
+    
+    Args:
+        connection_id: ID of the database connection
+        sql: SQL query to execute (SELECT only)
+    
+    Returns:
+        Query results with columns, rows, and execution time
+    """
+    
+    try:
+        logger.info(f"Execute request: connection={request.connection_id}, sql='{request.sql[:50]}'")
+        
+        # Create chat service
+        chat_service = ChatService()
+        
+        try:
+            # Execute query
+            result = await chat_service.execute_query(
+                connection_id=request.connection_id,
+                sql=request.sql
+            )
+            
+            return ExecuteResponse(
+                success=result.get("success", False),
+                columns=result.get("columns", []),
+                data=result.get("rows", []),
+                row_count=result.get("row_count", 0),
+                execution_time_ms=result.get("execution_time_ms", 0),
+                error=result.get("error")
+            )
+        
+        finally:
+            chat_service.close()
+    
+    except Exception as e:
+        logger.error(f"Execute endpoint error: {str(e)}", exc_info=True)
+        return ExecuteResponse(
+            success=False,
+            error=str(e)
+        )

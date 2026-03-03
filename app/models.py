@@ -1,6 +1,6 @@
 """Database models for metadata storage"""
 
-from sqlalchemy import Column as SA_Column, Integer, String, Text, Boolean, DateTime, ForeignKey
+from sqlalchemy import Column as SA_Column, Integer, String, Text, Boolean, DateTime, ForeignKey as SA_ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -34,7 +34,7 @@ class Database(Base):
     __tablename__ = "databases"
     
     id = SA_Column(Integer, primary_key=True)
-    connection_id = SA_Column(Integer, ForeignKey("connections.id", ondelete="CASCADE"), nullable=False)
+    connection_id = SA_Column(Integer, SA_ForeignKey("connections.id", ondelete="CASCADE"), nullable=False)
     name = SA_Column(String(255), nullable=False)
     row_count = SA_Column(Integer, default=0)
     last_indexed = SA_Column(DateTime)
@@ -52,7 +52,7 @@ class Table(Base):
     __tablename__ = "tables"
     
     id = SA_Column(Integer, primary_key=True)
-    database_id = SA_Column(Integer, ForeignKey("databases.id", ondelete="CASCADE"), nullable=False)
+    database_id = SA_Column(Integer, SA_ForeignKey("databases.id", ondelete="CASCADE"), nullable=False)
     name = SA_Column(String(255), nullable=False)
     context = SA_Column(Text)
     embedding_id = SA_Column(String(255))
@@ -75,13 +75,14 @@ class Column(Base):
     __tablename__ = "columns"
     
     id = SA_Column(Integer, primary_key=True)
-    table_id = SA_Column(Integer, ForeignKey("tables.id", ondelete="CASCADE"), nullable=False)
+    table_id = SA_Column(Integer, SA_ForeignKey("tables.id", ondelete="CASCADE"), nullable=False)
     name = SA_Column(String(255), nullable=False)
     data_type = SA_Column(String(100), nullable=False)
     is_nullable = SA_Column(Boolean, default=True)
     context = SA_Column(Text)
     embedding_id = SA_Column(String(255))
     sample_values = SA_Column(Text)
+    is_primary_key = SA_Column(Boolean, default=False)
     created_at = SA_Column(DateTime, default=datetime.utcnow)
     updated_at = SA_Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
@@ -93,7 +94,7 @@ class Sample(Base):
     __tablename__ = "samples"
     
     id = SA_Column(Integer, primary_key=True)
-    table_id = SA_Column(Integer, ForeignKey("tables.id", ondelete="CASCADE"), nullable=False)
+    table_id = SA_Column(Integer, SA_ForeignKey("tables.id", ondelete="CASCADE"), nullable=False)
     sample_data = SA_Column(Text, nullable=False)  # Store as JSON string
     embedding_id = SA_Column(String(255))
     generated_at = SA_Column(DateTime, default=datetime.utcnow)
@@ -106,7 +107,7 @@ class Query(Base):
     __tablename__ = "queries"
     
     id = SA_Column(Integer, primary_key=True)
-    connection_id = SA_Column(Integer, ForeignKey("connections.id"), nullable=False)
+    connection_id = SA_Column(Integer, SA_ForeignKey("connections.id"), nullable=False)
     user_prompt = SA_Column(Text, nullable=False)
     generated_sql = SA_Column(Text)
     result_status = SA_Column(String(50))
@@ -122,9 +123,9 @@ class DataEmbeddingRefreshLog(Base):
     __tablename__ = "data_embedding_refresh_log"
     
     id = SA_Column(Integer, primary_key=True)
-    connection_id = SA_Column(Integer, ForeignKey("connections.id", ondelete="CASCADE"), nullable=False)
-    table_id = SA_Column(Integer, ForeignKey("tables.id", ondelete="CASCADE"), nullable=False)
-    column_id = SA_Column(Integer, ForeignKey("columns.id", ondelete="CASCADE"), nullable=False)
+    connection_id = SA_Column(Integer, SA_ForeignKey("connections.id", ondelete="CASCADE"), nullable=False)
+    table_id = SA_Column(Integer, SA_ForeignKey("tables.id", ondelete="CASCADE"), nullable=False)
+    column_id = SA_Column(Integer, SA_ForeignKey("columns.id", ondelete="CASCADE"), nullable=False)
     last_sampled_at = SA_Column(DateTime)  # When data was last sampled
     sample_count = SA_Column(Integer, default=0)  # Number of distinct values sampled
     refresh_status = SA_Column(String(50), default="pending")  # pending, in_progress, completed, failed
@@ -136,3 +137,53 @@ class DataEmbeddingRefreshLog(Base):
     connection = relationship("Connection")
     table = relationship("Table")
     column = relationship("Column")
+
+
+class ForeignKeyModel(Base):
+    """Foreign key relationship metadata"""
+    __tablename__ = "foreign_keys"
+    
+    id = SA_Column(Integer, primary_key=True)
+    database_id = SA_Column(Integer, SA_ForeignKey("databases.id", ondelete="CASCADE"), nullable=False)
+    table_name = SA_Column(String(255), nullable=False)  # Source table
+    column_name = SA_Column(String(255), nullable=False)  # Source column
+    referenced_table = SA_Column(String(255), nullable=False)  # Target table
+    referenced_column = SA_Column(String(255), nullable=False)  # Target column
+    constraint_name = SA_Column(String(255))  # FK constraint name from database
+    created_at = SA_Column(DateTime, default=datetime.utcnow)
+    updated_at = SA_Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    database = relationship("Database")
+
+
+# ============================================================================
+# AUTH MODELS
+# ============================================================================
+
+class User(Base):
+    """Application user"""
+    __tablename__ = "users"
+
+    id = SA_Column(Integer, primary_key=True)
+    username = SA_Column(String(100), unique=True, nullable=False, index=True)
+    password_hash = SA_Column(Text, nullable=False)
+    is_active = SA_Column(Boolean, default=True)
+    created_at = SA_Column(DateTime, default=datetime.utcnow)
+    updated_at = SA_Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    permissions = relationship("UserPermission", back_populates="user", cascade="all, delete")
+
+
+class UserPermission(Base):
+    """
+    Many-to-many-style permission table.
+    Valid permission values: db_onboard, db_reindex, prompt_query
+    """
+    __tablename__ = "user_permissions"
+
+    id = SA_Column(Integer, primary_key=True)
+    user_id = SA_Column(Integer, SA_ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    permission = SA_Column(String(50), nullable=False)  # db_onboard | db_reindex | prompt_query
+    created_at = SA_Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", back_populates="permissions")

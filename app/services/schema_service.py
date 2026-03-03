@@ -124,13 +124,15 @@ class SchemaExtractor:
             
             logger.info(f"Processing table: {table_name}")
             columns = inspector.get_columns(table_name)
+            pk_constraint = inspector.get_pk_constraint(table_name) or {}
+            pk_columns = set(pk_constraint.get("constrained_columns") or [])
             
             column_list = [
                 {
                     "name": col["name"],
                     "type": str(col["type"]),
                     "nullable": col.get("nullable", True),
-                    "primary_key": col.get("primary_key", False)
+                    "primary_key": col["name"] in pk_columns
                 }
                 for col in columns
             ]
@@ -152,3 +154,55 @@ class SchemaExtractor:
         
         logger.info(f"_do_extract completed, returning {len(schema_data['tables'])} tables")
         return schema_data
+
+    @staticmethod
+    def get_foreign_keys(engine) -> Dict[str, Dict[str, Dict]]:
+        """
+        Extract foreign key constraints from database using SQLAlchemy inspector.
+        
+        Returns:
+        {
+            "table_name": {
+                "column_name": {
+                    "references_table": "ref_table",
+                    "references_column": "ref_column",
+                    "constraint_name": "fk_name"
+                }
+            }
+        }
+        
+        Works on: PostgreSQL, MySQL (8.0+), SQL Server
+        """
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+        
+        fk_map = {}
+        
+        for table_name in tables:
+            # Skip system tables
+            if table_name.startswith('pg_') or table_name.startswith('information_schema'):
+                continue
+            
+            try:
+                fks = inspector.get_foreign_keys(table_name)
+                if fks:
+                    fk_map[table_name] = {}
+                    for fk in fks:
+                        # fk structure: {
+                        #     'name': 'constraint_name',
+                        #     'constrained_columns': ['column_name'],
+                        #     'referred_schema': 'schema',
+                        #     'referred_table': 'ref_table',
+                        #     'referred_columns': ['ref_column']
+                        # }
+                        for col, ref_col in zip(fk['constrained_columns'], fk['referred_columns']):
+                            fk_map[table_name][col] = {
+                                "references_table": fk['referred_table'],
+                                "references_column": ref_col,
+                                "constraint_name": fk.get('name', '')
+                            }
+            except Exception as e:
+                logger.warning(f"Could not extract FKs for {table_name}: {e}")
+        
+        logger.info(f"Extracted FKs for {len(fk_map)} tables")
+        return fk_map

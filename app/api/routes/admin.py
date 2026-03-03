@@ -14,6 +14,7 @@ from app.services.schema_service import SchemaExtractor
 from app.services.indexing_service import IndexingService
 from app.services.ollama_service import OllamaService
 from app.services.vector_service import VectorService
+from app.api.deps import get_current_user, require_permission
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +104,8 @@ class ConnectionInfo(BaseModel):
 async def register_database(
     request: RegisterDBRequest,
     background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_permission("db_onboard")),
 ):
     """Register a new database for chatbot context"""
     
@@ -154,7 +156,10 @@ async def register_database(
 
 
 @router.get("/databases", response_model=List[ConnectionInfo])
-async def list_databases(db: Session = Depends(get_db)):
+async def list_databases(
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
     """List all registered databases"""
     
     try:
@@ -170,7 +175,8 @@ async def list_databases(db: Session = Depends(get_db)):
 async def trigger_reindex(
     connection_id: int,
     background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_permission("db_reindex")),
 ):
     """Manually trigger context reindexing"""
     
@@ -207,7 +213,8 @@ async def trigger_reindex(
 async def query_audit_log(
     connection_id: int,
     limit: int = 50,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
 ):
     """Get query audit log"""
     
@@ -280,7 +287,8 @@ class RefreshDataEmbeddingsRequest(BaseModel):
 @router.get("/summaries/{connection_id}", response_model=SummaryListResponse)
 async def get_table_summaries(
     connection_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
 ):
     """Get all table summaries for a connection"""
     
@@ -334,7 +342,8 @@ async def get_table_summaries(
 async def update_table_summary(
     table_id: int,
     request: UpdateSummaryRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_permission("db_reindex")),
 ):
     """Update a table summary (human override)"""
     
@@ -473,7 +482,8 @@ async def trigger_refresh_data_embeddings(
     connection_id: int,
     request: RefreshDataEmbeddingsRequest,
     background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_permission("db_reindex")),
 ):
     """Trigger data variation embedding refresh for a connection"""
     

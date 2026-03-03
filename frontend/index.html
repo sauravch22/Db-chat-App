@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DbChat — Talk to your Database</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        d: {
+                            bg: '#0b0d11', card: '#13161d', input: '#1b1e27',
+                            border: '#252938', hover: '#2a2f40', accent: '#7c6eff',
+                            accentH: '#6a5be0', text: '#dfe1e8', muted: '#6b7084',
+                            green: '#34d399', red: '#f87171', surface: '#171a23',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        *{box-sizing:border-box}
+        body{background:#0b0d11;color:#dfe1e8;font-family:Inter,-apple-system,BlinkMacSystemFont,sans-serif;margin:0}
+        ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:#13161d}::-webkit-scrollbar-thumb{background:#363b50;border-radius:3px}
+        #chatArea{scroll-behavior:smooth}
+        .typing-dot{animation:tBounce 1.4s infinite ease-in-out both}
+        .typing-dot:nth-child(1){animation-delay:-.32s}.typing-dot:nth-child(2){animation-delay:-.16s}
+        @keyframes tBounce{0%,80%,100%{transform:scale(0)}40%{transform:scale(1)}}
+        .msg-in{animation:slideUp .25s ease-out}
+        @keyframes slideUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+        .sql-block{background:#10121a;border:1px solid #252938;border-radius:8px;font-family:'JetBrains Mono','Fira Code',monospace;font-size:12.5px;line-height:1.65;color:#a5b4fc;padding:14px 16px;overflow-x:auto;white-space:pre-wrap;word-break:break-word}
+        .dt{border-collapse:collapse;width:100%;font-size:12.5px}
+        .dt th{background:#171a23;color:#a5b4fc;padding:9px 12px;text-align:left;font-weight:600;text-transform:uppercase;font-size:10.5px;letter-spacing:.5px;border-bottom:2px solid #252938;position:sticky;top:0;z-index:1}
+        .dt td{padding:7px 12px;border-bottom:1px solid #1a1d28;color:#bfc4d8}
+        .dt tr:hover td{background:#161922}
+        .dt .num{text-align:right;font-variant-numeric:tabular-nums}
+        .user-msg{background:#7c6eff;color:#fff;border-radius:16px 16px 4px 16px;padding:10px 16px;max-width:70%;font-size:14px;line-height:1.5}
+        .bot-msg{background:#13161d;border:1px solid #252938;border-radius:4px 16px 16px 16px;padding:16px 20px}
+        .chip{font-size:11.5px;background:#1b1e27;border:1px solid #252938;border-radius:8px;padding:5px 12px;color:#6b7084;cursor:pointer;transition:all .15s}
+        .chip:hover{color:#dfe1e8;border-color:#7c6eff;background:#1f2330}
+        .chart-chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;background:#1b1e27;border:1px solid #252938;border-radius:8px;padding:6px 14px;color:#a5b4fc;cursor:pointer;transition:all .15s}
+        .chart-chip:hover{border-color:#7c6eff;background:#1f2330;color:#c4b5fd}
+        .chart-chip svg{width:14px;height:14px}
+        .toggle-hdr{cursor:pointer;user-select:none;display:flex;align-items:center;gap:6px;font-size:12px;color:#6b7084;transition:color .15s}
+        .toggle-hdr:hover{color:#dfe1e8}
+        .toggle-hdr .arr{transition:transform .2s;display:inline-block;font-size:10px}
+        .toggle-hdr.open .arr{transform:rotate(90deg)}
+        .collapse-body{overflow:hidden;transition:max-height .25s ease,opacity .2s;max-height:0;opacity:0}
+        .collapse-body.show{opacity:1}
+
+        /* ─── Modal / Dialog ─── */
+        .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .2s}
+        .modal-overlay.open{opacity:1;pointer-events:auto}
+        .modal-box{background:#13161d;border:1px solid #252938;border-radius:14px;width:92vw;max-width:960px;max-height:88vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+        .modal-header{display:flex;align-items:center;justify-content:between;padding:16px 20px;border-bottom:1px solid #252938;gap:12px;shrink:0}
+        .modal-body{flex:1;overflow:auto;padding:20px}
+        .modal-close{background:none;border:1px solid #252938;border-radius:8px;color:#6b7084;width:32px;height:32px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:16px;transition:all .15s;margin-left:auto}
+        .modal-close:hover{color:#dfe1e8;border-color:#7c6eff}
+
+        /* Detail explorer */
+        .search-input{background:#1b1e27;border:1px solid #252938;border-radius:8px;padding:8px 12px;font-size:13px;color:#dfe1e8;outline:none;width:100%;transition:border-color .15s}
+        .search-input:focus{border-color:#7c6eff}
+        .search-input::placeholder{color:#4a4f65}
+        .col-select{background:#1b1e27;border:1px solid #252938;border-radius:8px;padding:8px 12px;font-size:13px;color:#dfe1e8;outline:none;appearance:none;cursor:pointer}
+        .col-select:focus{border-color:#7c6eff}
+        .match-hl{background:rgba(124,110,255,.3);border-radius:2px;padding:0 1px}
+        .regex-err{color:#f87171;font-size:11px;margin-top:4px}
+
+        /* ─── Login screen ─── */
+        #loginScreen{position:fixed;inset:0;z-index:200;background:#0b0d11;display:flex;align-items:center;justify-content:center;transition:opacity .3s}
+        #loginScreen.hidden{opacity:0;pointer-events:none;display:none}
+        .login-card{background:#13161d;border:1px solid #252938;border-radius:16px;padding:40px 36px 36px;width:380px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+        .login-card h2{font-size:20px;font-weight:700;color:#fff;margin:0 0 4px}
+        .login-card p{font-size:13px;color:#6b7084;margin:0 0 24px}
+        .login-card label{display:block;font-size:12px;color:#8b8fa3;margin-bottom:5px;font-weight:500}
+        .login-card input{width:100%;background:#1b1e27;border:1px solid #252938;border-radius:10px;padding:10px 14px;font-size:14px;color:#dfe1e8;outline:none;transition:border-color .15s;margin-bottom:16px}
+        .login-card input:focus{border-color:#7c6eff}
+        .login-card input::placeholder{color:#4a4f65}
+        .login-btn{width:100%;background:#7c6eff;color:#fff;border:none;border-radius:10px;padding:11px;font-size:14px;font-weight:600;cursor:pointer;transition:background .15s}
+        .login-btn:hover{background:#6a5be0}
+        .login-btn:disabled{opacity:.5;cursor:not-allowed}
+        .login-err{color:#f87171;font-size:12px;margin-top:10px;text-align:center;min-height:18px}
+
+        /* ─── Permission badge ─── */
+        .perm-badge{font-size:10px;padding:2px 8px;border-radius:4px;font-weight:600;text-transform:uppercase;letter-spacing:.3px}
+        .perm-badge.onboard{background:rgba(52,211,153,.15);color:#34d399}
+        .perm-badge.reindex{background:rgba(251,191,36,.15);color:#fbbf24}
+        .perm-badge.query{background:rgba(124,110,255,.15);color:#a78bfa}
+
+        /* ─── Auth toggle link ─── */
+        .auth-toggle{color:#7c6eff;cursor:pointer;font-size:13px;text-align:center;margin-top:16px}
+        .auth-toggle:hover{text-decoration:underline}
+
+        /* ─── Admin panel ─── */
+        .tab-bar{display:flex;border-bottom:1px solid #252938;background:#0f1117}
+        .tab-btn{padding:10px 20px;font-size:13px;font-weight:600;color:#6b7084;cursor:pointer;border:none;background:none;border-bottom:2px solid transparent;transition:all .15s}
+        .tab-btn:hover{color:#dfe1e8}
+        .tab-btn.active{color:#7c6eff;border-bottom-color:#7c6eff}
+        .admin-panel{background:#0f1117;border:1px solid #252938;border-radius:12px;overflow:hidden;margin-top:8px}
+        .user-row{display:flex;align-items:center;gap:16px;padding:12px 20px;border-bottom:1px solid #1a1d28;transition:background .1s}
+        .user-row:hover{background:#13161d}
+        .user-row:last-child{border-bottom:none}
+        .perm-toggle{font-size:11px;padding:4px 12px;border-radius:6px;font-weight:600;cursor:pointer;border:1px solid transparent;transition:all .15s;text-transform:uppercase;letter-spacing:.3px}
+        .perm-toggle.on{opacity:1}
+        .perm-toggle.off{opacity:.35}
+        .perm-toggle.onboard.on{background:rgba(52,211,153,.15);color:#34d399;border-color:rgba(52,211,153,.3)}
+        .perm-toggle.onboard.off{background:transparent;color:#34d399;border-color:#252938}
+        .perm-toggle.reindex.on{background:rgba(251,191,36,.15);color:#fbbf24;border-color:rgba(251,191,36,.3)}
+        .perm-toggle.reindex.off{background:transparent;color:#fbbf24;border-color:#252938}
+        .perm-toggle.query.on{background:rgba(124,110,255,.15);color:#a78bfa;border-color:rgba(124,110,255,.3)}
+        .perm-toggle.query.off{background:transparent;color:#a78bfa;border-color:#252938}
+        .save-status{font-size:11px;color:#34d399;opacity:0;transition:opacity .3s}
+        .save-status.show{opacity:1}
+    </style>
+</head>
+<body class="h-screen flex flex-col overflow-hidden">
+
+    <!-- ═══════════ LOGIN / SIGNUP SCREEN ═══════════ -->
+    <div id="loginScreen">
+        <div class="login-card">
+            <div class="flex items-center gap-3 mb-5">
+                <div class="w-10 h-10 rounded-xl bg-d-accent flex items-center justify-center text-white font-bold text-base">DB</div>
+                <div><h2>DbChat</h2><p style="margin:0" id="authSubtitle">Sign in to continue</p></div>
+            </div>
+
+            <!-- Sign In form -->
+            <div id="signinForm">
+                <label for="loginUser">Username</label>
+                <input id="loginUser" type="text" placeholder="Enter username" autocomplete="username" autofocus
+                       onkeydown="if(event.key==='Enter')document.getElementById('loginPass').focus()">
+                <label for="loginPass">Password</label>
+                <input id="loginPass" type="password" placeholder="Enter password" autocomplete="current-password"
+                       onkeydown="if(event.key==='Enter')doLogin()">
+                <button id="loginBtn" class="login-btn" onclick="doLogin()">Sign In</button>
+                <div id="loginError" class="login-err"></div>
+                <div class="auth-toggle" onclick="showSignupForm()">Don't have an account? <strong>Sign Up</strong></div>
+            </div>
+
+            <!-- Sign Up form (hidden by default) -->
+            <div id="signupForm" style="display:none">
+                <label for="signupUser">Username</label>
+                <input id="signupUser" type="text" placeholder="Choose a username" autocomplete="username"
+                       onkeydown="if(event.key==='Enter')document.getElementById('signupPass').focus()">
+                <label for="signupPass">Password</label>
+                <input id="signupPass" type="password" placeholder="Choose a password" autocomplete="new-password"
+                       onkeydown="if(event.key==='Enter')document.getElementById('signupPass2').focus()">
+                <label for="signupPass2">Confirm Password</label>
+                <input id="signupPass2" type="password" placeholder="Confirm password" autocomplete="new-password"
+                       onkeydown="if(event.key==='Enter')doSignup()">
+                <button id="signupBtn" class="login-btn" onclick="doSignup()">Create Account</button>
+                <div id="signupError" class="login-err"></div>
+                <div id="signupSuccess" class="login-err" style="color:#34d399"></div>
+                <div class="auth-toggle" onclick="showSigninForm()">Already have an account? <strong>Sign In</strong></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══════════ MAIN APP (hidden until login) ═══════════ -->
+    <div id="appShell" class="h-screen flex flex-col overflow-hidden" style="display:none">
+
+        <!-- Top Bar -->
+        <header class="flex items-center justify-between px-5 py-2.5 border-b border-d-border bg-d-card shrink-0">
+            <div class="flex items-center gap-3">
+                <div class="w-8 h-8 rounded-lg bg-d-accent flex items-center justify-center text-white font-bold text-sm">DB</div>
+                <div><h1 class="text-sm font-semibold text-white leading-tight">DbChat</h1><p class="text-[11px] text-d-muted">Natural language SQL assistant</p></div>
+            </div>
+            <div class="flex items-center gap-4">
+                <div class="flex items-center gap-2 bg-d-input border border-d-border rounded-lg px-3 py-1.5">
+                    <div class="w-2 h-2 rounded-full bg-d-green" style="animation:pulse 2s infinite"></div>
+                    <select id="dbSelector" class="bg-transparent text-sm text-d-text outline-none cursor-pointer appearance-none pr-5" style="background-image:url('data:image/svg+xml;charset=US-ASCII,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2212%22 height=%2212%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22%236b7084%22 stroke-width=%222%22%3E%3Cpolyline points=%226 9 12 15 18 9%22/%3E%3C/svg%3E');background-repeat:no-repeat;background-position:right 0 center"><option value="">Loading…</option></select>
+                </div>
+                <!-- User menu -->
+                <div class="flex items-center gap-2">
+                    <span id="userLabel" class="text-xs text-d-muted"></span>
+                    <div id="userPerms" class="flex gap-1"></div>
+                    <button onclick="doLogout()" class="text-xs text-d-muted hover:text-d-red border border-d-border rounded-lg px-3 py-1.5 transition" title="Sign out">Logout</button>
+                </div>
+            </div>
+            <input type="hidden" id="chatUrl" value="http://localhost:8000">
+            <input type="hidden" id="vizUrl" value="http://localhost:8001">
+        </header>
+
+        <!-- Tab bar (Admin tab only visible to admin users) -->
+        <div id="tabBar" class="tab-bar" style="display:none">
+            <button class="tab-btn active" onclick="switchTab('chat')" id="tabChat">💬 Chat</button>
+            <button class="tab-btn" onclick="switchTab('admin')" id="tabAdmin">👥 Admin</button>
+        </div>
+
+        <!-- Chat Tab -->
+        <div id="chatTab" class="flex flex-col flex-1 overflow-hidden">
+        <!-- Chat -->
+        <main id="chatArea" class="flex-1 overflow-y-auto px-4 py-5">
+            <div id="messages" class="max-w-5xl mx-auto space-y-5">
+                <div class="msg-in flex gap-3">
+                    <div class="w-8 h-8 rounded-lg bg-d-accent flex items-center justify-center text-white text-xs font-bold shrink-0 mt-1">DB</div>
+                    <div class="bot-msg"><p class="text-sm">👋 Hi! I'm <strong>DbChat</strong> — ask me anything about your data in plain English.</p>
+                        <div class="flex flex-wrap gap-2 mt-3">
+                            <button onclick="askChip(this)" class="chip">Show total revenue by country</button>
+                            <button onclick="askChip(this)" class="chip">Top 10 customers by spending</button>
+                            <button onclick="askChip(this)" class="chip">Monthly revenue trend</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div id="typing" class="hidden max-w-5xl mx-auto mt-4"><div class="flex gap-3"><div class="w-8 h-8 rounded-lg bg-d-accent flex items-center justify-center text-white text-xs font-bold shrink-0">DB</div><div class="bot-msg py-3 px-4"><div class="flex gap-1.5 items-center h-5"><div class="typing-dot w-2 h-2 bg-d-muted rounded-full"></div><div class="typing-dot w-2 h-2 bg-d-muted rounded-full"></div><div class="typing-dot w-2 h-2 bg-d-muted rounded-full"></div></div></div></div></div>
+        </main>
+
+        <!-- Input -->
+        <footer class="shrink-0 border-t border-d-border bg-d-card px-4 py-3">
+            <div class="max-w-5xl mx-auto flex gap-3 items-end">
+                <textarea id="queryInput" rows="1" placeholder="Ask about your data…" class="flex-1 bg-d-input border border-d-border rounded-xl px-4 py-3 text-sm text-d-text placeholder-d-muted outline-none resize-none focus:border-d-accent transition" style="max-height:120px" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage()}"></textarea>
+                <button id="sendBtn" onclick="sendMessage()" class="bg-d-accent hover:bg-d-accentH text-white rounded-xl px-5 py-3 text-sm font-medium transition shrink-0 disabled:opacity-40 disabled:cursor-not-allowed">Send ➤</button>
+            </div>
+            <p class="max-w-5xl mx-auto text-[10px] text-d-muted mt-1.5 text-center">DbChat generates SQL from your questions · Always review generated queries</p>
+        </footer>
+        </div><!-- /chatTab -->
+
+        <!-- Admin Tab (hidden by default) -->
+        <div id="adminTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-4xl mx-auto">
+                <div class="flex items-center justify-between mb-5">
+                    <div>
+                        <h2 class="text-lg font-semibold text-white">User Management</h2>
+                        <p class="text-xs text-d-muted mt-1">Manage user permissions. Click a badge to toggle it on/off. Changes save automatically.</p>
+                    </div>
+                    <button onclick="loadAdminUsers()" class="chip">↻ Refresh</button>
+                </div>
+                <div class="admin-panel">
+                    <div class="user-row" style="background:#0d0f14;padding:10px 20px">
+                        <span class="text-xs font-semibold text-d-muted uppercase" style="width:40px">#</span>
+                        <span class="text-xs font-semibold text-d-muted uppercase" style="flex:1">Username</span>
+                        <span class="text-xs font-semibold text-d-muted uppercase" style="width:100px;text-align:center">Onboard</span>
+                        <span class="text-xs font-semibold text-d-muted uppercase" style="width:100px;text-align:center">Reindex</span>
+                        <span class="text-xs font-semibold text-d-muted uppercase" style="width:100px;text-align:center">Query</span>
+                        <span style="width:60px"></span>
+                    </div>
+                    <div id="adminUserList"><p class="text-sm text-d-muted p-6">Loading users…</p></div>
+                </div>
+            </div>
+        </div><!-- /adminTab -->
+    </div><!-- /appShell -->
+
+    <!-- Chart Modal -->
+    <div id="chartModal" class="modal-overlay" onclick="if(event.target===this)closeChartModal()">
+        <div class="modal-box">
+            <div class="modal-header">
+                <h3 id="chartModalTitle" class="text-sm font-semibold text-white flex-1">Chart</h3>
+                <button class="modal-close" onclick="closeChartModal()">✕</button>
+            </div>
+            <div class="modal-body"><canvas id="chartModalCanvas"></canvas></div>
+        </div>
+    </div>
+
+    <!-- Detail Explorer Modal -->
+    <div id="detailModal" class="modal-overlay" onclick="if(event.target===this)closeDetailModal()">
+        <div class="modal-box" style="max-width:1100px;max-height:92vh">
+            <div class="modal-header" style="flex-wrap:wrap;gap:8px">
+                <h3 class="text-sm font-semibold text-white">Data Explorer</h3>
+                <div class="flex items-center gap-2 flex-1 min-w-[280px] ml-4">
+                    <select id="detailCol" class="col-select" onchange="filterDetailTable()"><option value="__all__">All columns</option></select>
+                    <div class="flex-1 relative">
+                        <input id="detailSearch" class="search-input" placeholder="Search (regex supported)…" oninput="filterDetailTable()">
+                        <div id="detailRegexErr" class="regex-err hidden"></div>
+                    </div>
+                    <span id="detailCount" class="text-xs text-d-muted whitespace-nowrap">0 rows</span>
+                </div>
+                <button class="modal-close" onclick="closeDetailModal()">✕</button>
+            </div>
+            <div class="modal-body" id="detailBody" style="padding:0"></div>
+        </div>
+    </div>
+
+    <script src="app.js?v=7"></script>
+    <style>@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}</style>
+</body>
+</html>

@@ -1,4 +1,5 @@
-"""Ollama LLM Service"""
+"""LLM Service — uses remote OpenAI-compatible API for generation,
+local Ollama for embeddings only."""
 
 import httpx
 import json
@@ -11,13 +12,75 @@ settings = Settings()
 
 
 class OllamaService:
-    """Service for interacting with Ollama LLM"""
+    """Service for interacting with remote LLM (chat completions) and local Ollama (embeddings)"""
     
     def __init__(self):
+        # Remote LLM (Qwen3-Coder-Next via ngrok)
+        self.llm_api_url = settings.LLM_API_URL
+        self.llm_model = settings.LLM_MODEL_NAME
+        self.llm_timeout = settings.LLM_TIMEOUT_SEC
+        self.llm_max_tokens = settings.LLM_MAX_TOKENS
+        # Local Ollama (embeddings only)
         self.base_url = settings.OLLAMA_URL
-        self.llm_model = settings.OLLAMA_LLM_MODEL
         self.embedding_model = settings.OLLAMA_EMBEDDING_MODEL
     
+    def _clean_sql_output(self, sql: str) -> str:
+        """Clean raw LLM output into valid SQL, preserving WITH/CTE clauses."""
+        # Strip markdown code fences
+        sql = sql.replace("```sql", "").replace("```", "").strip()
+
+        # Find the real SQL start: WITH (CTE) or SELECT
+        upper = sql.upper()
+        with_pos = upper.find("WITH")
+        select_pos = upper.find("SELECT")
+
+        # Pick whichever comes first as the true SQL start
+        candidates = []
+        if with_pos >= 0:
+            candidates.append(with_pos)
+        if select_pos >= 0:
+            candidates.append(select_pos)
+
+        if candidates:
+            sql_start = min(candidates)
+            if sql_start > 0:
+                sql = sql[sql_start:]
+
+        # Strip trailing explanation after the last semicolon
+        if ";" in sql:
+            sql = sql[:sql.index(";") + 1]
+
+        # Remove trailing quotes that LLM sometimes adds
+        sql = sql.rstrip('"').rstrip("'").strip()
+        return sql
+
+    async def _call_chat_completions(self, system: str, user: str, temperature: float = 0.0, max_tokens: int = None) -> str:
+        """Call the remote OpenAI-compatible chat completions API."""
+        payload = {
+            "model": self.llm_model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": temperature,
+            "max_tokens": max_tokens or self.llm_max_tokens,
+        }
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                self.llm_api_url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=self.llm_timeout,
+            )
+        if response.status_code != 200:
+            logger.error(f"LLM API error (status {response.status_code}): {response.text[:300]}")
+            raise Exception(f"LLM API returned status code {response.status_code}")
+        data = response.json()
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        usage = data.get("usage", {})
+        logger.debug(f"LLM tokens: prompt={usage.get('prompt_tokens','?')}, completion={usage.get('completion_tokens','?')}")
+        return content
+
     async def generate_sql(
         self,
         user_prompt: str,
@@ -27,11 +90,13 @@ class OllamaService:
         """Generate SQL query from natural language"""
         
         # Extract exact table names from the schema context to enforce as hard constraints
-        exact_tables = [
-            line.split("Table:", 1)[1].strip()
-            for line in schema_context.splitlines()
-            if line.startswith("Table:")
-        ]
+        exact_tables = []
+        for line in schema_context.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("Table:"):
+                exact_tables.append(stripped.split("Table:", 1)[1].strip())
+            elif stripped.startswith("=== TABLE:"):
+                exact_tables.append(stripped.split("=== TABLE:", 1)[1].strip("= "))
         table_list_str = ", ".join(exact_tables) if exact_tables else "(see schema)"
 
         system_prompt = f"""You are a PostgreSQL SQL expert. Your ONLY job is to output a single raw SQL SELECT query.
@@ -42,8 +107,15 @@ STRICT RULES:
 3. Only use SELECT statements — never INSERT, UPDATE, DELETE, DROP
 4. EXACT TABLE NAMES YOU MUST USE (copy these letter-for-letter, do NOT pluralize, singularize, or change them in any way): {table_list_str}
 5. Use ONLY column names listed in the schema below — do not guess or invent names
-6. Use standard PostgreSQL syntax — double quotes for identifiers if needed, NOT backticks
-7. Do not wrap the query in markdown code fences"""
+6. Always use table-qualified column names shown in the schema (table.column). Never use unqualified columns.
+7. If you reference a table in SELECT/WHERE/GROUP BY/ORDER BY, it MUST appear in FROM or JOIN.
+8. If a JOIN PATH or GLOBAL FOREIGN KEY RELATIONSHIPS are provided, use those exact join conditions.
+9. For comparisons to averages or totals, use a subquery; do NOT nest aggregates directly. Do NOT use CTE / WITH.
+10. Use standard PostgreSQL syntax — double quotes for identifiers if needed, NOT backticks
+11. Do not wrap the query in markdown code fences
+12. If you JOIN a subquery, the join key columns MUST be included in that subquery SELECT list
+13. Never reference columns from a subquery alias unless that column is explicitly selected by it
+14. For comparisons like "total per entity" vs "average", compute per-entity aggregates in a subquery, then compare to AVG of those aggregates"""
 
         full_prompt = f"""Schema:
 {schema_context}
@@ -53,48 +125,114 @@ User Question: {user_prompt}
 SQL query:"""
         
         try:
-            logger.debug(f"SQL generation: model={self.llm_model}, base_url={self.base_url}")
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.base_url}/api/generate",
-                    json={
-                        "model": self.llm_model,
-                        "prompt": full_prompt,
-                        "system": system_prompt,
-                        "stream": False,
-                        "temperature": 0.0,
-                        "options": {
-                            "num_ctx": settings.OLLAMA_SQL_NUM_CTX,
-                        },
-                    },
-                    timeout=settings.OLLAMA_GENERATE_TIMEOUT_SEC
-                )
-                
-                logger.debug(f"SQL generation response status: {response.status_code}")
-                if response.status_code == 200:
-                    result = response.json()
-                    sql = result.get("response", "").strip()
-                    # Strip markdown code fences
-                    sql = sql.replace("```sql", "").replace("```", "").strip()
-                    # If LLM added explanation text before SELECT, extract from SELECT onwards
-                    upper = sql.upper()
-                    select_pos = upper.find("SELECT")
-                    if select_pos > 0:
-                        sql = sql[select_pos:]
-                    # Strip trailing explanation after the semicolon
-                    if ";" in sql:
-                        sql = sql[:sql.index(";") + 1]
-                    # CRITICAL FIX: Remove trailing quotes that LLM sometimes adds
-                    sql = sql.rstrip('"').rstrip("'").strip()
-                    return sql
-                else:
-                    logger.error(f"Ollama error (status {response.status_code}): {response.text}")
-                    raise Exception(f"Ollama returned status code {response.status_code}")
+            logger.debug(f"SQL generation: model={self.llm_model}, url={self.llm_api_url}")
+            raw = await self._call_chat_completions(system_prompt, full_prompt)
+            sql = self._clean_sql_output(raw)
+            return sql
         
         except Exception as e:
             logger.error(f"Error generating SQL: {str(e)}")
             raise
+
+
+    async def generate_sql_with_reasoning(
+        self,
+        user_prompt: str,
+        schema_context: str,
+        sample_info: str = None
+    ) -> tuple:
+        """
+        Two-step SQL generation: Reason first, then generate
+        Returns: (reasoning, sql)
+        """
+        
+        # Extract table names from schema
+        exact_tables = []
+        for line in schema_context.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("Table:"):
+                exact_tables.append(stripped.split("Table:", 1)[1].strip())
+            elif stripped.startswith("=== TABLE:"):
+                exact_tables.append(stripped.split("=== TABLE:", 1)[1].strip("= "))
+        table_list_str = ", ".join(exact_tables) if exact_tables else "(see schema)"
+        
+        # STEP 1: Force LLM to reason about query structure
+        reasoning_system = """You are a SQL query planner. Your job is to analyze the question and schema, then plan the query structure BEFORE writing any SQL code.
+        
+Think step-by-step and be specific about table names and column names from the schema."""
+        
+        reasoning_prompt = f"""Schema (these are the ONLY tables and columns that exist):
+{schema_context}
+
+User Question: {user_prompt}
+
+Analyze this question step-by-step. Answer these questions:
+
+1. TABLES & JOINS: What tables are needed? How do they join?
+   - Look at GLOBAL FOREIGN KEY RELATIONSHIPS section
+   - List the exact join conditions using table.column format
+
+2. OUTPUT COLUMNS: What columns should be in the SELECT clause?
+   - Use exact column names from the COLUMNS section
+   - Use table.column format
+
+3. AGGREGATION: Is aggregation needed (COUNT, SUM, AVG, MAX, MIN)?
+   - If yes, what column(s) and what function(s)?
+   - What should the GROUP BY be?
+
+4. COMPARISON PATTERN: Is this comparing individual values to an aggregate (average, total, etc.)?
+   - If YES, this requires: compute per-group values FIRST, then compare to aggregate of those values
+   - Example: "customers spending more than average" needs:
+     * Subquery: compute total per customer
+     * Main query: compare to AVG of those totals
+   
+5. FILTERING: What goes in WHERE vs HAVING?
+   - WHERE: filters before grouping
+   - HAVING: filters after grouping (on aggregates)
+
+Your analysis (be specific with table.column names):"""
+
+        try:
+            logger.debug(f"Step 1 - Reasoning: model={self.llm_model}")
+            
+            # Step 1: Get reasoning
+            reasoning = await self._call_chat_completions(reasoning_system, reasoning_prompt, max_tokens=1024)
+            logger.info(f"LLM Reasoning (first 300 chars): {reasoning[:300]}...")
+            
+            # STEP 2: Generate SQL using the reasoning
+            sql_system = f"""You are a PostgreSQL SQL expert. Generate SQL based on the query analysis provided.
+
+STRICT RULES:
+1. Output ONLY the SQL query — no explanation
+2. Use ONLY tables and columns from the schema: {table_list_str}
+3. Always use table.column format (table-qualified names)
+4. Follow the structure identified in your analysis
+5. If analysis identified "comparison to average/total across groups", use a scalar subquery
+6. Use standard PostgreSQL syntax
+7. Do NOT use CTE / WITH — use subqueries instead
+8. If JOINing a subquery, the join key MUST be in that subquery's SELECT list"""
+
+            sql_prompt = f"""Schema:
+{schema_context}
+
+User Question: {user_prompt}
+
+Your analysis of this query:
+{reasoning}
+
+Based on your analysis above, write the SQL query that answers the question.
+Follow the structure and approach you identified.
+
+SQL query:"""
+
+            raw = await self._call_chat_completions(sql_system, sql_prompt)
+            sql = self._clean_sql_output(raw)
+            return reasoning, sql
+        
+        except Exception as e:
+            logger.error(f"Error in reasoning-based SQL generation: {str(e)}")
+            # Fallback to direct generation
+            return "", await self.generate_sql(user_prompt, schema_context, sample_info)
 
     async def identify_tables(self, user_prompt: str, table_summaries: list) -> list:
         """Identify relevant tables from provided summaries. Returns list of exact table names."""
@@ -119,50 +257,29 @@ SQL query:"""
         )
 
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.base_url}/api/generate",
-                    json={
-                        "model": self.llm_model,
-                        "prompt": prompt,
-                        "system": system_prompt,
-                        "stream": False,
-                        "temperature": 0.0,
-                        "options": {
-                            "num_ctx": settings.OLLAMA_SQL_NUM_CTX,
-                        },
-                    },
-                    timeout=settings.OLLAMA_GENERATE_TIMEOUT_SEC
-                )
+            raw = await self._call_chat_completions(system_prompt, prompt, max_tokens=256)
+            raw = raw.replace("```json", "").replace("```", "").strip()
 
-                if response.status_code != 200:
-                    logger.error(f"Ollama identify_tables error (status {response.status_code}): {response.text}")
-                    return []
+            # Try direct JSON parse
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    return [str(t) for t in parsed]
+            except json.JSONDecodeError:
+                pass
 
-                result = response.json()
-                raw = result.get("response", "").strip()
-                raw = raw.replace("```json", "").replace("```", "").strip()
-
-                # Try direct JSON parse
+            # Fallback: extract JSON array from text
+            start = raw.find("[")
+            end = raw.rfind("]")
+            if start != -1 and end != -1 and end > start:
                 try:
-                    parsed = json.loads(raw)
+                    parsed = json.loads(raw[start:end + 1])
                     if isinstance(parsed, list):
                         return [str(t) for t in parsed]
                 except json.JSONDecodeError:
-                    pass
+                    return []
 
-                # Fallback: extract JSON array from text
-                start = raw.find("[")
-                end = raw.rfind("]")
-                if start != -1 and end != -1 and end > start:
-                    try:
-                        parsed = json.loads(raw[start:end + 1])
-                        if isinstance(parsed, list):
-                            return [str(t) for t in parsed]
-                    except json.JSONDecodeError:
-                        return []
-
-                return []
+            return []
         except Exception as e:
             logger.error(f"Error identifying tables: {str(e)}")
             return []
@@ -219,7 +336,7 @@ SQL query:"""
             raise
 
     async def classify_intent(self, text: str) -> str:
-        """Classify user prompt intent using Ollama. Returns one of: 'catalog' or 'data'."""
+        """Classify user prompt intent. Returns one of: 'catalog' or 'data'."""
         system = (
             "You are a query classifier. Classify the user prompt into exactly one of two categories:\n"
             "\n"
@@ -241,48 +358,48 @@ SQL query:"""
         )
 
         try:
-            logger.debug(f"Classify intent: model={self.llm_model}, base_url={self.base_url}")
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.base_url}/api/generate",
-                    json={
-                        "model": self.llm_model,
-                        "prompt": text,
-                        "system": system,
-                        "stream": False,
-                        "temperature": 0.0,
-                        "options": {
-                            "num_ctx": settings.OLLAMA_SQL_NUM_CTX,
-                        },
-                    },
-                    timeout=settings.OLLAMA_CLASSIFY_TIMEOUT_SEC
-                )
-
-                logger.debug(f"Classify response status: {response.status_code}")
-                if response.status_code == 200:
-                    result = response.json()
-                    out = result.get("response", "").strip().lower()
-                    if "catalog" in out:
-                        return "catalog"
-                    return "data"
-                else:
-                    logger.error(f"Ollama classify error (status {response.status_code}): {response.text}")
-                    return "data"
+            logger.debug(f"Classify intent: model={self.llm_model}, url={self.llm_api_url}")
+            out = await self._call_chat_completions(system, text, max_tokens=10)
+            out = out.strip().lower()
+            if "catalog" in out:
+                return "catalog"
+            return "data"
 
         except Exception as e:
             logger.error(f"Error classifying intent: {str(e)}")
             return "data"
     
     async def health_check(self) -> bool:
-        """Check if Ollama is running"""
+        """Check if remote LLM API and local Ollama (embeddings) are reachable"""
         
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{self.base_url}/api/tags",
-                    timeout=120.0
+                # Check remote LLM endpoint
+                llm_resp = await client.post(
+                    self.llm_api_url,
+                    json={
+                        "model": self.llm_model,
+                        "messages": [{"role": "user", "content": "SELECT 1"}],
+                        "max_tokens": 5,
+                    },
+                    headers={"Content-Type": "application/json"},
+                    timeout=30.0,
                 )
-                return response.status_code == 200
-        except:
+                llm_ok = llm_resp.status_code == 200
+                
+                # Check local Ollama for embeddings
+                ollama_resp = await client.get(
+                    f"{self.base_url}/api/tags",
+                    timeout=30.0,
+                )
+                ollama_ok = ollama_resp.status_code == 200
+                
+                if not llm_ok:
+                    logger.warning(f"Remote LLM endpoint not reachable: {self.llm_api_url}")
+                if not ollama_ok:
+                    logger.warning(f"Local Ollama not reachable: {self.base_url}")
+                
+                return llm_ok and ollama_ok
+        except Exception as e:
+            logger.error(f"Health check failed: {str(e)}")
             return False
