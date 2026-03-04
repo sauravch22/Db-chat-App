@@ -56,6 +56,7 @@ Business teams drown in data they **can't access**. Every "quick question" — *
 | 📋 | **Full Activity Audit Log** | Every action is tracked — logins, queries, permission changes, reindexes — with timestamps, duration, IP, user agent, and status. Admins see global; users see their own. |
 | 💾 | **Persistent Chat History** | Chat conversations persist across sessions, scoped per user and per database connection. Log back in and your previous queries are exactly where you left them. |
 | 🔍 | **Data Explorer** | Click "Explore" on any result to open a modal with regex search, column filtering, and row highlighting — in both chat results and dashboard pins. |
+| 🧠 | **Explain Query** | From any result with SQL, click **🧠 Explain** to get a step-by-step natural language breakdown of what the query does: tables used, joins, filters, aggregations, and how each column in the result is computed. |
 | 🧠 | **Two-Step Reasoning Mode** | The LLM first reasons about which tables and joins are needed, then generates SQL — dramatically improving accuracy on complex multi-table queries. |
 | 🗂️ | **Catalog Queries** | Ask structural questions like *"What tables exist?"*, *"Describe the orders table"* — handled directly from indexed metadata without SQL generation. |
 | 🔗 | **Foreign Key Auto-Detection** | FKs are extracted during indexing and injected into every SQL prompt — the LLM generates correct JOINs without guessing. |
@@ -345,6 +346,16 @@ This is the heart of DbChat, executing in five stages:
 **Stage 4 — SQL Generation**: In reasoning mode, the LLM first produces a reasoning chain (*"I need to JOIN customers and invoices via CustomerId, then GROUP BY Country"*), then generates the actual SQL using the schema context + reasoning as input. The SQL is validated to be a read-only `SELECT` statement — no mutations allowed.
 
 **Stage 5 — Execution & Response**: The generated SQL is executed against the **user's target database** (not the metadata store). Results (columns + rows) are returned to the frontend, saved to `chat_history` for persistence, and logged in `activity_logs` for auditing. The frontend independently sends results to the Viz Service for chart recommendations.
+
+### Explain Query Flow
+
+From any chat response (or replayed history item) that includes SQL, the frontend exposes an **🧠 Explain** chip. Clicking it sends the original prompt, generated SQL, and optional schema/column metadata to the `/api/chat/explain` endpoint. The LLM returns a structured explanation covering:
+- Which tables are used and why
+- How joins are constructed (which foreign keys / columns)
+- What filters, GROUP BY, HAVING, ORDER BY, and LIMIT clauses do
+- How each key output column is computed
+
+The explanation is rendered in a modal so users can quickly validate query intent, making it safe for non-SQL users to understand and discuss generated SQL with data teams.
 
 ## Flow 4: Dashboard Pin & Refresh
 
