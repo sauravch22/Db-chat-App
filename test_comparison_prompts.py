@@ -10,7 +10,7 @@ from typing import Tuple
 
 BASE_URL = "http://localhost:8000"
 CONNECTION_ID = 3
-TIMEOUT = 30
+TIMEOUT = 180  # 3 minutes for reasoning mode for slow queries/LLM regeneration
 
 # ANSI color codes
 GREEN = '\033[0;32m'

@@ -1,8 +1,8 @@
-"""Auth API routes – login, register, profile, user management."""
+"""Auth API routes – login, signup, profile, DB-level permission management."""
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict
 from sqlalchemy.orm import Session
 import logging
 
@@ -11,12 +11,14 @@ from app.services.auth_service import (
     authenticate_user,
     create_user,
     create_access_token,
-    get_user_permissions,
+    get_user_perms_dict,
     get_user_by_username,
+    set_db_permissions,
     VALID_PERMISSIONS,
 )
-from app.api.deps import get_current_user
-from app.models import User, UserPermission
+from app.services.activity_service import log_activity, Actions
+from app.api.deps import get_current_user, is_db_admin, has_any_onboard
+from app.models import User, UserPermission, Connection
 
 logger = logging.getLogger(__name__)
 
@@ -33,20 +35,7 @@ class LoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     username: str
-    permissions: List[str]
-
-
-class RegisterRequest(BaseModel):
-    username: str
-    password: str
-    permissions: List[str]  # e.g. ["db_onboard", "prompt_query"]
-
-
-class RegisterResponse(BaseModel):
-    id: int
-    username: str
-    permissions: List[str]
-    message: str
+    perms: Dict[str, List[str]]  # {"*": ["db_onboard"], "3": [...]}
 
 
 class SignupRequest(BaseModel):
@@ -57,156 +46,249 @@ class SignupRequest(BaseModel):
 class SignupResponse(BaseModel):
     id: int
     username: str
-    permissions: List[str]
     message: str
-
-
-class UpdatePermissionsRequest(BaseModel):
-    permissions: List[str]  # full replacement list
 
 
 class ProfileResponse(BaseModel):
     id: int
     username: str
-    permissions: List[str]
+    perms: Dict[str, List[str]]
+    accessible_dbs: List[dict]
     is_active: bool
 
 
-class UserListItem(BaseModel):
+class DbPermissionsRequest(BaseModel):
+    connection_id: int
+    permissions: List[str]
+
+
+class UserDbPermsItem(BaseModel):
     id: int
     username: str
-    permissions: List[str]
     is_active: bool
+    permissions: List[str]
 
 
-# ── Endpoints ─────────────────────────────────────────
+# ── Login ─────────────────────────────────────────────
 @router.post("/login", response_model=LoginResponse)
-async def login(request: LoginRequest, db: Session = Depends(get_db)):
+async def login(request: LoginRequest, req: Request = None, db: Session = Depends(get_db)):
     """Authenticate and return a JWT token (5-hour expiry)."""
     user = authenticate_user(db, request.username, request.password)
     if not user:
+        await log_activity(req, action=Actions.LOGIN_FAILED, status="failed",
+                           detail={"username": request.username}, db=db)
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
-    perms = get_user_permissions(db, user.id)
+    perms = get_user_perms_dict(db, user.id)
     token = create_access_token(user.id, user.username, perms)
 
-    logger.info(f"User '{user.username}' logged in successfully")
-    return LoginResponse(
-        access_token=token,
-        username=user.username,
-        permissions=perms,
-    )
+    await log_activity(req, user={"sub": str(user.id), "username": user.username},
+                       action=Actions.LOGIN, detail={"perms": perms}, db=db)
+    logger.info(f"User '{user.username}' logged in")
+    return LoginResponse(access_token=token, username=user.username, perms=perms)
 
 
-@router.post("/register", response_model=RegisterResponse)
-async def register_user(
-    request: RegisterRequest,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
-):
-    """Create a new user. Only existing authenticated users can register others."""
-    try:
-        user = create_user(db, request.username, request.password, request.permissions)
-        perms = get_user_permissions(db, user.id)
-        logger.info(f"User '{user.username}' created by '{current_user['username']}' with permissions {perms}")
-        return RegisterResponse(
-            id=user.id,
-            username=user.username,
-            permissions=perms,
-            message="User created successfully",
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
+# ── Public Signup ─────────────────────────────────────
 @router.post("/signup", response_model=SignupResponse)
-async def signup(request: SignupRequest, db: Session = Depends(get_db)):
-    """Public self-registration. New users always get prompt_query only."""
+async def signup(request: SignupRequest, req: Request = None, db: Session = Depends(get_db)):
+    """Public self-registration.
+
+    New users get **zero** permissions — they cannot access any database
+    until an admin grants them per-DB access.
+    """
     try:
-        user = create_user(db, request.username, request.password, ["prompt_query"])
-        perms = get_user_permissions(db, user.id)
-        logger.info(f"New user '{user.username}' signed up (self-registration)")
+        user = create_user(db, request.username, request.password)
+        await log_activity(req, user={"sub": str(user.id), "username": user.username},
+                           action=Actions.SIGNUP, resource_type="user", resource_id=user.id, db=db)
+        logger.info(f"New user '{user.username}' signed up (no permissions)")
         return SignupResponse(
             id=user.id,
             username=user.username,
-            permissions=perms,
-            message="Account created! You can now sign in.",
+            message="Account created! Ask an admin to grant you database access.",
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.put("/users/{user_id}/permissions")
-async def update_user_permissions(
-    user_id: int,
-    request: UpdatePermissionsRequest,
-    db: Session = Depends(get_db),
+# ── My Profile ────────────────────────────────────────
+@router.get("/me", response_model=ProfileResponse)
+async def my_profile(
+    req: Request,
     current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    """Update a user's permissions. Only users with db_onboard can do this."""
-    caller_perms = current_user.get("permissions", [])
-    if "db_onboard" not in caller_perms:
-        raise HTTPException(status_code=403, detail="Only admins (db_onboard) can manage permissions")
+    """Return the current user's profile, permissions, and accessible databases."""
+    user = db.query(User).filter(User.id == int(current_user["sub"])).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
 
-    bad = set(request.permissions) - VALID_PERMISSIONS
-    if bad:
-        raise HTTPException(status_code=400, detail=f"Invalid permissions: {bad}")
+    perms = get_user_perms_dict(db, user.id)
+
+    # Build accessible DB list
+    is_global_admin = "db_onboard" in perms.get("*", [])
+    if is_global_admin:
+        connections = db.query(Connection).filter(Connection.is_active == True).all()
+    else:
+        conn_ids = [int(k) for k in perms.keys() if k != "*" and perms[k]]
+        if conn_ids:
+            connections = db.query(Connection).filter(
+                Connection.id.in_(conn_ids), Connection.is_active == True
+            ).all()
+        else:
+            connections = []
+
+    accessible = [{"id": c.id, "name": c.name} for c in connections]
+
+    await log_activity(req, user=current_user, action=Actions.TOKEN_REFRESH, db=db)
+
+    return ProfileResponse(
+        id=user.id,
+        username=user.username,
+        perms=perms,
+        accessible_dbs=accessible,
+        is_active=user.is_active,
+    )
+
+
+# ── List all users ────────────────────────────────────
+@router.get("/users")
+async def list_users(
+    req: Request,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """List all users with their full permission maps."""
+    await log_activity(req, user=current_user, action=Actions.VIEW_USERS, db=db)
+    users = db.query(User).all()
+    result = []
+    for u in users:
+        perms = get_user_perms_dict(db, u.id)
+        result.append({
+            "id": u.id,
+            "username": u.username,
+            "is_active": u.is_active,
+            "perms": perms,
+        })
+    return result
+
+
+# ── Users for a specific DB ──────────────────────────
+@router.get("/users/db/{connection_id}", response_model=List[UserDbPermsItem])
+async def list_users_for_db(
+    connection_id: int,
+    req: Request,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """List all users with their permissions for a specific database.
+
+    Only admins of this DB can view this.
+    """
+    if not is_db_admin(current_user, connection_id):
+        await log_activity(req, user=current_user, action=Actions.PERM_DENIED,
+                           connection_id=connection_id, status="denied",
+                           detail={"attempted": "view_db_users"}, db=db)
+        raise HTTPException(
+            status_code=403,
+            detail="Only admins of this database can view its users",
+        )
+
+    conn = db.query(Connection).filter(Connection.id == connection_id).first()
+    if not conn:
+        raise HTTPException(status_code=404, detail="Database not found")
+
+    await log_activity(req, user=current_user, action=Actions.VIEW_DB_USERS,
+                       connection_id=connection_id, resource_type="connection",
+                       resource_id=connection_id, db=db)
+
+    users = db.query(User).all()
+    result = []
+    for u in users:
+        user_perms = (
+            db.query(UserPermission)
+            .filter(
+                UserPermission.user_id == u.id,
+                UserPermission.connection_id == connection_id,
+            )
+            .all()
+        )
+        result.append(
+            UserDbPermsItem(
+                id=u.id,
+                username=u.username,
+                is_active=u.is_active,
+                permissions=[p.permission for p in user_perms],
+            )
+        )
+    return result
+
+
+# ── Update user permissions on a DB ──────────────────
+@router.put("/users/{user_id}/db-permissions")
+async def update_user_db_permissions(
+    user_id: int,
+    request: DbPermissionsRequest,
+    req: Request,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Set permissions for a user on a specific database.
+
+    Caller must be admin (``db_onboard``) on that database.
+    """
+    if not is_db_admin(current_user, request.connection_id):
+        await log_activity(req, user=current_user, action=Actions.PERM_DENIED,
+                           connection_id=request.connection_id, status="denied",
+                           detail={"attempted": "update_perm", "target_user": user_id}, db=db)
+        raise HTTPException(
+            status_code=403,
+            detail="Only admins of this database can manage its permissions",
+        )
 
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Delete existing permissions and re-create
-    db.query(UserPermission).filter(UserPermission.user_id == user_id).delete()
-    for perm in set(request.permissions):
-        db.add(UserPermission(user_id=user_id, permission=perm))
-    db.commit()
+    try:
+        set_db_permissions(db, user_id, request.connection_id, request.permissions)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-    new_perms = get_user_permissions(db, user_id)
-    logger.info(f"Permissions updated for '{user.username}' by '{current_user['username']}': {new_perms}")
-    return {"id": user_id, "username": user.username, "permissions": new_perms, "message": "Permissions updated"}
-
-
-@router.get("/me", response_model=ProfileResponse)
-async def my_profile(
-    current_user: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Return the current user's profile and permissions."""
-    user = db.query(User).filter(User.id == int(current_user["sub"])).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    perms = get_user_permissions(db, user.id)
-    return ProfileResponse(
-        id=user.id,
-        username=user.username,
-        permissions=perms,
-        is_active=user.is_active,
+    new_perms = (
+        db.query(UserPermission)
+        .filter(
+            UserPermission.user_id == user_id,
+            UserPermission.connection_id == request.connection_id,
+        )
+        .all()
     )
+    perm_list = [p.permission for p in new_perms]
+
+    await log_activity(req, user=current_user, action=Actions.UPDATE_PERM,
+                       connection_id=request.connection_id, resource_type="user",
+                       resource_id=user_id,
+                       detail={"target_user": user.username, "permissions": perm_list}, db=db)
+    logger.info(
+        f"Perms updated for '{user.username}' on conn {request.connection_id}: {perm_list} "
+        f"by '{current_user['username']}'"
+    )
+    return {
+        "user_id": user_id,
+        "username": user.username,
+        "connection_id": request.connection_id,
+        "permissions": perm_list,
+    }
 
 
-@router.get("/users", response_model=List[UserListItem])
-async def list_users(
-    current_user: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """List all users (any authenticated user can view)."""
-    users = db.query(User).all()
-    result = []
-    for u in users:
-        perms = [p.permission for p in u.permissions]
-        result.append(UserListItem(id=u.id, username=u.username, permissions=perms, is_active=u.is_active))
-    return result
-
-
+# ── Available permissions (public) ────────────────────
 @router.get("/permissions")
 async def available_permissions():
     """Return the list of valid permission names (public, no auth needed)."""
     return {
         "permissions": sorted(VALID_PERMISSIONS),
         "description": {
-            "db_onboard": "Register / onboard new databases",
-            "db_reindex": "Trigger reindex on existing databases",
-            "prompt_query": "Use the chat prompt and view charts / data",
+            "db_onboard": "Admin of a database — manage users, reindex, query",
+            "db_reindex": "Can reindex and query a database",
+            "prompt_query": "Can query a database (chat and view charts)",
         },
     }

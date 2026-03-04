@@ -1,0 +1,18 @@
+feat: DbChat v12.1 with auth, dashboard, viz-service, and v13 implementation plan
+
+Core features (v10-v12.1):
+- JWT auth with signup/login, role-based DB permissions
+- Admin panel with user management and DB permission controls
+- Natural language SQL via Qwen3-Coder-Next (reasoning mode)
+- Vector-assisted table selection (Qdrant + nomic-embed-text)
+- Smart SQL validation, repair loop (2 retries), answer formatting
+- Persistent per-user chat history with load/clear
+- Activity logging with user-scoped audit trail
+- Dashboard with pin data, explore data in modal
+- Viz-service for chart chip suggestions (bar, line, pie, scatter)
+- Frontend SPA with dark theme, collapsible SQL/JSON, chart modals
+
+New in this commit:
+- IMPLEMENTATION_PLAN.md for v13: Query Explanation Mode + Multi-Turn Conversations
+- Test scripts for LLM SQL generation (few-shot, Qwen3 benchmarks)
+- Various utility and migration scripts

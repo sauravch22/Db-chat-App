@@ -1,6 +1,6 @@
 """Admin API endpoints"""
 
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Request
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import List, Optional
@@ -14,7 +14,8 @@ from app.services.schema_service import SchemaExtractor
 from app.services.indexing_service import IndexingService
 from app.services.ollama_service import OllamaService
 from app.services.vector_service import VectorService
-from app.api.deps import get_current_user, require_permission
+from app.services.activity_service import log_activity, Actions
+from app.api.deps import get_current_user, has_db_permission, has_any_onboard
 
 logger = logging.getLogger(__name__)
 
@@ -103,11 +104,16 @@ class ConnectionInfo(BaseModel):
 @router.post("/register-db", response_model=RegisterDBResponse)
 async def register_database(
     request: RegisterDBRequest,
+    req: Request,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    user: dict = Depends(require_permission("db_onboard")),
+    user: dict = Depends(get_current_user),
 ):
     """Register a new database for chatbot context"""
+    if not has_any_onboard(user):
+        await log_activity(req, user=user, action=Actions.PERM_DENIED, status="denied",
+                           detail={"attempted": "register_db", "db_name": request.name}, db=db)
+        raise HTTPException(status_code=403, detail="You must be an admin of at least one database to register new ones")
     
     try:
         logger.info(f"Registering database: {request.name}")
@@ -130,6 +136,17 @@ async def register_database(
         logger.info(f"Created connection record with ID {connection.id}")
         db.commit()
         
+        # Auto-assign creator as admin of the new database
+        from app.services.auth_service import grant_all_on_connection
+        grant_all_on_connection(db, int(user["sub"]), connection.id)
+        logger.info(f"User '{user['username']}' auto-assigned as admin of connection {connection.id}")
+        
+        await log_activity(req, user=user, action=Actions.REGISTER_DB,
+                           connection_id=connection.id, resource_type="connection",
+                           resource_id=connection.id,
+                           detail={"name": request.name, "host": request.host,
+                                   "database": request.database, "type": request.database_type}, db=db)
+
         # Schedule schema extraction and indexing as background task
         background_tasks.add_task(
             _extract_and_index_database,
@@ -157,13 +174,27 @@ async def register_database(
 
 @router.get("/databases", response_model=List[ConnectionInfo])
 async def list_databases(
+    req: Request,
     db: Session = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
-    """List all registered databases"""
+    """List databases the current user has access to"""
     
     try:
-        connections = db.query(Connection).filter(Connection.is_active == True).all()
+        perms = user.get("perms", {})
+        is_global_admin = "db_onboard" in perms.get("*", [])
+        
+        if is_global_admin:
+            connections = db.query(Connection).filter(Connection.is_active == True).all()
+        else:
+            conn_ids = [int(k) for k in perms.keys() if k != "*" and perms[k]]
+            if not conn_ids:
+                return []
+            connections = db.query(Connection).filter(
+                Connection.is_active == True, Connection.id.in_(conn_ids)
+            ).all()
+        await log_activity(req, user=user, action=Actions.LIST_DATABASES,
+                           detail={"count": len(connections)}, db=db)
         return connections
     
     except Exception as e:
@@ -174,11 +205,17 @@ async def list_databases(
 @router.post("/reindex/{connection_id}")
 async def trigger_reindex(
     connection_id: int,
+    req: Request,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    user: dict = Depends(require_permission("db_reindex")),
+    user: dict = Depends(get_current_user),
 ):
     """Manually trigger context reindexing"""
+    if not has_db_permission(user, connection_id, "db_reindex"):
+        await log_activity(req, user=user, action=Actions.PERM_DENIED,
+                           connection_id=connection_id, status="denied",
+                           detail={"attempted": "reindex"}, db=db)
+        raise HTTPException(status_code=403, detail="Permission 'db_reindex' required on this database")
     
     try:
         # Get connection
@@ -198,6 +235,10 @@ async def trigger_reindex(
             connection.database_type
         )
         
+        await log_activity(req, user=user, action=Actions.REINDEX,
+                           connection_id=connection_id, resource_type="connection",
+                           resource_id=connection_id, db=db)
+
         return {
             "status": "indexing_started",
             "connection_id": connection_id,
@@ -212,11 +253,17 @@ async def trigger_reindex(
 @router.get("/audit")
 async def query_audit_log(
     connection_id: int,
+    req: Request,
     limit: int = 50,
     db: Session = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
     """Get query audit log"""
+    if not has_db_permission(user, connection_id, "prompt_query"):
+        await log_activity(req, user=user, action=Actions.PERM_DENIED,
+                           connection_id=connection_id, status="denied",
+                           detail={"attempted": "view_audit"}, db=db)
+        raise HTTPException(status_code=403, detail="Permission required on this database")
     
     try:
         from app.models import Query
@@ -226,6 +273,9 @@ async def query_audit_log(
             Query.connection_id == connection_id
         ).order_by(Query.created_at.desc()).limit(limit).all()
         
+        await log_activity(req, user=user, action=Actions.VIEW_AUDIT,
+                           connection_id=connection_id, db=db)
+
         return {
             "connection_id": connection_id,
             "queries": [
@@ -287,10 +337,16 @@ class RefreshDataEmbeddingsRequest(BaseModel):
 @router.get("/summaries/{connection_id}", response_model=SummaryListResponse)
 async def get_table_summaries(
     connection_id: int,
+    req: Request,
     db: Session = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
     """Get all table summaries for a connection"""
+    if not has_db_permission(user, connection_id, "prompt_query"):
+        await log_activity(req, user=user, action=Actions.PERM_DENIED,
+                           connection_id=connection_id, status="denied",
+                           detail={"attempted": "view_summaries"}, db=db)
+        raise HTTPException(status_code=403, detail="Permission required on this database")
     
     try:
         # Verify connection exists
@@ -324,6 +380,9 @@ async def get_table_summaries(
                 row_count=table.sample_count
             ))
         
+        await log_activity(req, user=user, action=Actions.VIEW_SUMMARIES,
+                           connection_id=connection_id, detail={"table_count": len(summaries)}, db=db)
+
         return SummaryListResponse(
             connection_id=connection_id,
             database_name=db_name,
@@ -342,8 +401,9 @@ async def get_table_summaries(
 async def update_table_summary(
     table_id: int,
     request: UpdateSummaryRequest,
+    req: Request,
     db: Session = Depends(get_db),
-    user: dict = Depends(require_permission("db_reindex")),
+    user: dict = Depends(get_current_user),
 ):
     """Update a table summary (human override)"""
     
@@ -351,6 +411,11 @@ async def update_table_summary(
         table = db.query(Table).filter(Table.id == table_id).first()
         if not table:
             raise HTTPException(status_code=404, detail="Table not found")
+        
+        # Resolve connection_id via table → database → connection
+        database_obj = db.query(Database).filter(Database.id == table.database_id).first()
+        if not database_obj or not has_db_permission(user, database_obj.connection_id, "db_reindex"):
+            raise HTTPException(status_code=403, detail="Permission 'db_reindex' required on this database")
         
         # Update summary fields
         table.summary = request.summary
@@ -362,6 +427,11 @@ async def update_table_summary(
         
         logger.info(f"Updated summary for table {table_id} (override={request.is_human_override})")
         
+        await log_activity(req, user=user, action=Actions.UPDATE_SUMMARY,
+                           connection_id=database_obj.connection_id,
+                           resource_type="table", resource_id=table_id,
+                           detail={"table_name": table.name, "override": request.is_human_override}, db=db)
+
         return {
             "success": True,
             "table_id": table_id,
@@ -481,11 +551,17 @@ async def _refresh_data_embeddings_task(
 async def trigger_refresh_data_embeddings(
     connection_id: int,
     request: RefreshDataEmbeddingsRequest,
+    req: Request,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    user: dict = Depends(require_permission("db_reindex")),
+    user: dict = Depends(get_current_user),
 ):
     """Trigger data variation embedding refresh for a connection"""
+    if not has_db_permission(user, connection_id, "db_reindex"):
+        await log_activity(req, user=user, action=Actions.PERM_DENIED,
+                           connection_id=connection_id, status="denied",
+                           detail={"attempted": "refresh_embeddings"}, db=db)
+        raise HTTPException(status_code=403, detail="Permission 'db_reindex' required on this database")
     
     try:
         # Verify connection exists
@@ -529,6 +605,11 @@ async def trigger_refresh_data_embeddings(
         
         logger.info(f"Scheduled data embedding refresh for connection {connection_id}")
         
+        await log_activity(req, user=user, action=Actions.REFRESH_EMBEDDINGS,
+                           connection_id=connection_id, resource_type="connection",
+                           resource_id=connection_id,
+                           detail={"mode": request.refresh_mode}, db=db)
+
         return {
             "success": True,
             "connection_id": connection_id,

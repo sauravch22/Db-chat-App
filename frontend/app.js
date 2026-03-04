@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-//  DbChat – Frontend App  (v6 — with Auth)
+//  DbChat – Frontend App  (v12.1 — Pin Data Feature)
 // ══════════════════════════════════════════════════════
 
 let selectedConnId = null;
@@ -8,11 +8,19 @@ let chartIdx = 0;
 
 // Auth state
 let authToken = localStorage.getItem('dbchat_token') || null;
-let currentUser = null; // { username, permissions }
+let currentUser = null; // { username, perms: {"*":["db_onboard"], "3":[...]} }
 
 // Store last response data for the detail explorer
 let lastResponseRows = [];
 let lastResponseCols = [];
+
+// Dashboard state
+let currentDashboardId = null;
+let dashboardPinCharts = {};  // { canvasId: Chart instance }
+let dashboardPinData = {};    // { pinId: { columns: [...], rows: [...] } }
+
+// Pin context (set when user interacts with chart/result)
+let pinContext = { prompt: null, sql: null, chartType: null, chartConfig: null, chartTitle: null };
 
 const chatUrl = () => document.getElementById('chatUrl').value;
 const vizUrl  = () => document.getElementById('vizUrl').value;
@@ -50,7 +58,7 @@ async function doLogin() {
         const data = await r.json();
         authToken = data.access_token;
         localStorage.setItem('dbchat_token', authToken);
-        currentUser = { username: data.username, permissions: data.permissions };
+        currentUser = { username: data.username, perms: data.perms || {} };
         showApp();
     } catch (e) {
         errEl.textContent = 'Cannot reach server. Is it running?';
@@ -63,6 +71,7 @@ function doLogout() {
     authToken = null;
     currentUser = null;
     localStorage.removeItem('dbchat_token');
+    clearChat();
     showLogin();
 }
 
@@ -109,9 +118,8 @@ async function doSignup() {
             errEl.textContent = data.detail || 'Could not create account';
             return;
         }
-        succEl.textContent = '✓ Account created! You can now sign in.';
+        succEl.textContent = data.message || '✓ Account created! You can now sign in.';
         userEl.value = ''; passEl.value = ''; pass2El.value = '';
-        // Auto-switch to sign in after 1.5s
         setTimeout(() => {
             showSigninForm();
             document.getElementById('loginUser').value = u;
@@ -128,7 +136,6 @@ function showLogin() {
     document.getElementById('loginScreen').classList.remove('hidden');
     document.getElementById('loginScreen').style.display = '';
     document.getElementById('appShell').style.display = 'none';
-    // Reset both forms
     document.getElementById('signinForm').style.display = '';
     document.getElementById('signupForm').style.display = 'none';
     document.getElementById('authSubtitle').textContent = 'Sign in to continue';
@@ -142,13 +149,26 @@ function showApp() {
     document.getElementById('loginScreen').classList.add('hidden');
     document.getElementById('loginScreen').style.display = 'none';
     document.getElementById('appShell').style.display = '';
+    clearChat();
     renderUserBadge();
     loadDatabases();
 
-    // Show admin tab if user has db_onboard
-    const isAdmin = currentUser && currentUser.permissions && currentUser.permissions.includes('db_onboard');
-    document.getElementById('tabBar').style.display = isAdmin ? '' : 'none';
+    // Tab bar always visible; admin button only for admins
+    document.getElementById('tabBar').style.display = '';
+    const isAnyAdmin = _isAnyAdmin();
+    document.getElementById('tabAdmin').style.display = isAnyAdmin ? '' : 'none';
+    // Activity tab button label: admins see "Activity", regular users see "My Activity"
+    const actBtn = document.getElementById('tabActivity');
+    actBtn.textContent = isAnyAdmin ? '📋 Activity' : '📋 My Activity';
     switchTab('chat');
+}
+
+// ── Permission helpers (client-side) ─────────────────
+function _perms() { return (currentUser && currentUser.perms) || {}; }
+function _isGlobalAdmin() { return (_perms()["*"] || []).includes("db_onboard"); }
+function _isAnyAdmin() {
+    const p = _perms();
+    return Object.entries(p).some(([, v]) => v.includes("db_onboard"));
 }
 
 function renderUserBadge() {
@@ -156,25 +176,31 @@ function renderUserBadge() {
     document.getElementById('userLabel').textContent = currentUser.username;
     const permsEl = document.getElementById('userPerms');
     permsEl.innerHTML = '';
-    const map = { db_onboard: ['onboard', 'Onboard'], db_reindex: ['reindex', 'Reindex'], prompt_query: ['query', 'Query'] };
-    (currentUser.permissions || []).forEach(p => {
-        const [cls, label] = map[p] || ['query', p];
-        permsEl.innerHTML += `<span class="perm-badge ${cls}">${label}</span>`;
-    });
+    const perms = _perms();
+    const isGlobal = _isGlobalAdmin();
+
+    if (isGlobal) {
+        permsEl.innerHTML = '<span class="perm-badge onboard">Global Admin</span>';
+    } else {
+        const dbKeys = Object.keys(perms).filter(k => k !== "*" && perms[k].length);
+        const adminCount = dbKeys.filter(k => perms[k].includes("db_onboard")).length;
+        const viewerCount = dbKeys.length - adminCount;
+        if (adminCount > 0) permsEl.innerHTML += `<span class="perm-badge onboard">Admin (${adminCount} DB${adminCount > 1 ? 's' : ''})</span>`;
+        if (viewerCount > 0) permsEl.innerHTML += `<span class="perm-badge query">Viewer (${viewerCount} DB${viewerCount > 1 ? 's' : ''})</span>`;
+        if (dbKeys.length === 0) permsEl.innerHTML = '<span class="perm-badge" style="background:rgba(107,112,132,.15);color:#6b7084">No DB access</span>';
+    }
 }
 
 // ─── Init: check stored token on page load ───────────
 document.addEventListener('DOMContentLoaded', async () => {
     if (!authToken) { showLogin(); return; }
-    // Validate token by hitting /api/auth/me
     try {
         const r = await fetch(`${chatUrl()}/api/auth/me`, { headers: authHeaders() });
         if (!r.ok) throw 0;
         const me = await r.json();
-        currentUser = { username: me.username, permissions: me.permissions };
+        currentUser = { username: me.username, perms: me.perms || {} };
         showApp();
     } catch {
-        // Token expired or invalid
         doLogout();
     }
 });
@@ -201,7 +227,10 @@ async function loadDatabases() {
         if (!r.ok) throw 0;
         const dbs = await r.json();
         sel.innerHTML = '';
-        if (!dbs.length) { sel.innerHTML = '<option>No databases</option>'; return; }
+        if (!dbs.length) {
+            sel.innerHTML = '<option value="">No databases available</option>';
+            return;
+        }
 
         const preferred = dbs.find(db => db.id === 3) || dbs.find(db => /neon|chinook/i.test(db.name));
         const sorted = preferred ? [preferred, ...dbs.filter(db => db.id !== preferred.id)] : dbs;
@@ -211,18 +240,19 @@ async function loadDatabases() {
             o.value = db.id; o.textContent = db.name; sel.appendChild(o);
         });
         selectedConnId = sorted[0].id;
-        sel.onchange = () => { selectedConnId = +sel.value; };
+        sel.onchange = () => { selectedConnId = +sel.value; clearChat(); loadChatHistory(); };
+
+        // Load history for initial DB
+        await loadChatHistory();
     } catch(e) {
         if (e.message && e.message.includes('Session expired')) return;
-        sel.innerHTML = '<option value="3">Chinook DB</option>';
-        selectedConnId = 3;
+        sel.innerHTML = '<option value="">No databases</option>';
     }
 }
 
 // ─── Chips / auto-resize ─────────────────────────────
 function askChip(btn) { document.getElementById('queryInput').value = btn.textContent.trim(); sendMessage(); }
 
-// Setup textarea auto-resize after DOM ready
 document.addEventListener('DOMContentLoaded', () => {
     const ta = document.getElementById('queryInput');
     if (ta) ta.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 120) + 'px'; });
@@ -248,7 +278,7 @@ async function sendMessage() {
         const data = await r.json();
         setTyping(false);
         if (r.status === 403) {
-            addBotError('Permission denied: you need "prompt_query" permission to use chat.');
+            addBotError('Permission denied: you don\'t have "prompt_query" access on this database.');
         } else if (data.status === 'error') {
             addBotError(data.error || 'Something went wrong');
         } else {
@@ -265,6 +295,84 @@ async function sendMessage() {
         isProcessing = false;
         document.getElementById('sendBtn').disabled = false;
     }
+}
+
+// ─── Clear chat (reset to welcome) ───────────────────
+function clearChat() {
+    const el = document.getElementById('messages');
+    el.innerHTML = `
+        <div class="msg-in flex gap-3">
+            <div class="w-8 h-8 rounded-lg bg-d-accent flex items-center justify-center text-white text-xs font-bold shrink-0 mt-1">DB</div>
+            <div class="bot-msg"><p class="text-sm">👋 Hi! I'm <strong>DbChat</strong> — ask me anything about your data in plain English.</p>
+                <div class="flex flex-wrap gap-2 mt-3">
+                    <button onclick="askChip(this)" class="chip">Show total revenue by country</button>
+                    <button onclick="askChip(this)" class="chip">Top 10 customers by spending</button>
+                    <button onclick="askChip(this)" class="chip">Monthly revenue trend</button>
+                </div>
+            </div>
+        </div>`;
+    lastResponseRows = [];
+    lastResponseCols = [];
+    chartIdx = 0;
+}
+
+// ─── Load persisted chat history for current DB ──────
+async function loadChatHistory() {
+    if (!selectedConnId) return;
+    try {
+        const r = await authFetch(`${chatUrl()}/api/chat/history?connection_id=${selectedConnId}&limit=50`);
+        if (!r.ok) return;
+        const items = await r.json();
+        if (!items.length) return;         // keep welcome message
+
+        // Replace welcome with history
+        const el = document.getElementById('messages');
+        el.innerHTML = '';
+
+        // History header
+        const hdr = document.createElement('div');
+        hdr.className = 'flex items-center justify-between px-2 py-2 mb-2';
+        hdr.innerHTML = `
+            <span class="text-xs text-d-muted">📜 ${items.length} previous conversation${items.length > 1 ? 's' : ''}</span>
+            <button onclick="clearChatHistory()" class="text-xs text-red-400 hover:text-red-300 underline">Clear history</button>`;
+        el.appendChild(hdr);
+
+        for (const item of items) {
+            // User prompt bubble
+            addUserMsg(item.prompt);
+
+            // Bot reply (reuse existing rendering logic)
+            if (item.status === 'error' || item.error_message) {
+                addBotError(item.error_message || 'Something went wrong');
+            } else {
+                // Build a data object that addBotReply expects
+                const data = {
+                    answer: item.answer,
+                    sql: item.sql,
+                    rows: item.rows || [],
+                    columns: item.columns || [],
+                    row_count: item.row_count,
+                    execution_time_ms: item.execution_time_ms,
+                    selected_tables: item.selected_tables || [],
+                };
+                await addBotReply(item.prompt, data);
+            }
+        }
+        scrollEnd();
+    } catch (e) {
+        logger_warn('loadChatHistory failed', e);
+    }
+}
+
+function logger_warn(msg, e) { try { console.warn(msg, e); } catch(_) {} }
+
+async function clearChatHistory() {
+    if (!selectedConnId) return;
+    if (!confirm('Clear all your chat history for this database?')) return;
+    try {
+        await authFetch(`${chatUrl()}/api/chat/history?connection_id=${selectedConnId}`, { method: 'DELETE' });
+    } catch (_) {}
+    clearChat();
 }
 
 // ─── User bubble ─────────────────────────────────────
@@ -305,9 +413,16 @@ async function addBotReply(query, data) {
     if (data.execution_time_ms) st.push(`${(data.execution_time_ms/1000).toFixed(1)}s`);
     if (st.length) h += `<div class="flex flex-wrap gap-3 text-xs text-d-muted">${st.join(' · ')}</div>`;
 
+    let pinDataBtnId = null;
     if (data.rows?.length && data.columns?.length) {
         h += buildTable(data.columns, data.rows, 30, data.row_count);
-        h += `<button onclick="openDetailModal()" class="chip mt-1">🔍 Explore full data (${Math.min(data.row_count||data.rows.length, 100)} rows)</button>`;
+        h += `<div class="flex flex-wrap gap-2 mt-1">`;
+        h += `<button onclick="openDetailModal()" class="chip">🔍 Explore full data (${Math.min(data.row_count||data.rows.length, 100)} rows)</button>`;
+        if (data.sql) {
+            pinDataBtnId = 'pin-data-' + Date.now();
+            h += `<button id="${pinDataBtnId}" class="chip" style="color:#fbbf24;border-color:rgba(251,191,36,.3)">📌 Pin Data</button>`;
+        }
+        h += `</div>`;
     }
 
     const chartAreaId = 'crec-' + Date.now();
@@ -330,8 +445,16 @@ async function addBotReply(query, data) {
     document.getElementById('messages').appendChild(wrap);
     scrollEnd();
 
+    // Attach pin-data button handler (uses closure for query/sql)
+    if (pinDataBtnId) {
+        const pinDataBtn = document.getElementById(pinDataBtnId);
+        if (pinDataBtn) {
+            pinDataBtn.onclick = () => openPinModal(query, data.sql, 'table', null, (query || '').substring(0, 60));
+        }
+    }
+
     if (data.rows?.length && data.columns?.length) {
-        await fetchChartChips(chartAreaId, data.columns, data.rows);
+        await fetchChartChips(chartAreaId, data.columns, data.rows, query, data.sql);
     }
 }
 
@@ -355,7 +478,7 @@ function buildTable(cols, rows, maxRows, totalRows) {
 }
 
 // ─── Fetch chart recommendations → chips ─────────────
-async function fetchChartChips(containerId, columns, rows) {
+async function fetchChartChips(containerId, columns, rows, prompt, sql) {
     try {
         const numRows = rows.map(r => {
             const o = {};
@@ -394,9 +517,22 @@ async function fetchChartChips(containerId, columns, rows) {
             const chip = document.createElement('button');
             chip.className = 'chart-chip';
             chip.innerHTML = (icons[rec.chart_type] || '') + esc(rec.title);
-            chip.onclick = () => openChartModal(rec);
+            chip.onclick = () => openChartModal(rec, prompt, sql);
             wrapper.appendChild(chip);
         });
+
+        // Add pin button if we have SQL
+        if (sql && wrapper.children.length) {
+            const pinChip = document.createElement('button');
+            pinChip.className = 'chart-chip';
+            pinChip.style.cssText = 'color:#fbbf24;border-color:rgba(251,191,36,.3)';
+            pinChip.innerHTML = '📌 Pin result';
+            pinChip.onclick = () => {
+                const firstRec = recs.find(r => r.chart_type !== 'table') || recs[0];
+                openPinModal(prompt, sql, firstRec?.chart_type || 'table', firstRec?.config ? JSON.stringify(firstRec.config) : null, firstRec?.title || prompt?.substring(0, 50));
+            };
+            wrapper.appendChild(pinChip);
+        }
 
         if (wrapper.children.length) {
             const label = document.createElement('p');
@@ -416,9 +552,22 @@ async function fetchChartChips(containerId, columns, rows) {
 // ═════════════════════════════════════════════════════
 let chartModalInstance = null;
 
-function openChartModal(rec) {
+function openChartModal(rec, prompt, sql) {
+    // Store pin context for the 📌 Pin button inside the chart modal
+    pinContext = {
+        prompt: prompt || null,
+        sql: sql || null,
+        chartType: rec.chart_type,
+        chartConfig: rec.config ? JSON.stringify(rec.config) : null,
+        chartTitle: rec.title || '',
+    };
+
     const overlay = document.getElementById('chartModal');
     document.getElementById('chartModalTitle').textContent = rec.title;
+    // Show/hide pin button based on whether we have SQL
+    const pinBtn = document.getElementById('chartPinBtn');
+    if (pinBtn) pinBtn.style.display = sql ? '' : 'none';
+
     const canvas = document.getElementById('chartModalCanvas');
     if (chartModalInstance) { chartModalInstance.destroy(); chartModalInstance = null; }
     canvas.width = canvas.parentElement.clientWidth - 40;
@@ -520,9 +669,9 @@ function renderChart(canvas, type, cfg) {
 let detailAllRows = [];
 let detailCols = [];
 
-function openDetailModal() {
-    detailCols = lastResponseCols.length ? lastResponseCols : [];
-    detailAllRows = (lastResponseRows || []).slice(0, 100);
+function openDetailModal(cols, rows) {
+    detailCols = cols || (lastResponseCols.length ? lastResponseCols : []);
+    detailAllRows = (rows || lastResponseRows || []).slice(0, 100);
 
     const sel = document.getElementById('detailCol');
     sel.innerHTML = '<option value="__all__">All columns</option>';
@@ -538,6 +687,13 @@ function openDetailModal() {
 
 function closeDetailModal() {
     document.getElementById('detailModal').classList.remove('open');
+}
+
+// Open the detail explorer for a dashboard pin
+function openPinDetailModal(pinId) {
+    const pinData = dashboardPinData[pinId];
+    if (!pinData) { alert('No data available for this pin.'); return; }
+    openDetailModal(pinData.columns, pinData.rows);
 }
 
 function filterDetailTable() {
@@ -625,34 +781,93 @@ function hlSQL(sql){
 function switchTab(tab) {
     const chatTab = document.getElementById('chatTab');
     const adminTab = document.getElementById('adminTab');
+    const activityTab = document.getElementById('activityTab');
+    const dashboardTab = document.getElementById('dashboardTab');
     const btnChat = document.getElementById('tabChat');
     const btnAdmin = document.getElementById('tabAdmin');
+    const btnActivity = document.getElementById('tabActivity');
+    const btnDashboard = document.getElementById('tabDashboard');
+
+    // Hide all tabs, deactivate all buttons
+    chatTab.style.display = 'none';
+    adminTab.style.display = 'none';
+    activityTab.style.display = 'none';
+    dashboardTab.style.display = 'none';
+    btnChat.classList.remove('active');
+    btnAdmin.classList.remove('active');
+    btnActivity.classList.remove('active');
+    btnDashboard.classList.remove('active');
 
     if (tab === 'admin') {
-        chatTab.style.display = 'none';
         adminTab.style.display = '';
-        btnChat.classList.remove('active');
         btnAdmin.classList.add('active');
-        loadAdminUsers();
+        populateAdminDbSelector();
+    } else if (tab === 'activity') {
+        activityTab.style.display = '';
+        btnActivity.classList.add('active');
+        initActivityTab();
+    } else if (tab === 'dashboard') {
+        dashboardTab.style.display = '';
+        btnDashboard.classList.add('active');
+        loadDashboardsList();
     } else {
         chatTab.style.display = '';
-        adminTab.style.display = 'none';
         btnChat.classList.add('active');
-        btnAdmin.classList.remove('active');
     }
 }
 
 // ═════════════════════════════════════════════════════
-//  ADMIN – USER MANAGEMENT
+//  ADMIN – PER-DB USER MANAGEMENT
 // ═════════════════════════════════════════════════════
 let adminUsers = [];
+let adminSelectedDb = null;
 
-async function loadAdminUsers() {
+function populateAdminDbSelector() {
+    const sel = document.getElementById('adminDbSelector');
+    sel.innerHTML = '<option value="">Select a database…</option>';
+    const perms = _perms();
+    const isGlobal = _isGlobalAdmin();
+
+    // Re-use already loaded database options from the chat DB selector
+    const chatSel = document.getElementById('dbSelector');
+    for (let i = 0; i < chatSel.options.length; i++) {
+        const connId = chatSel.options[i].value;
+        if (!connId) continue;
+        const dbPerms = perms[connId] || [];
+        if (isGlobal || dbPerms.includes('db_onboard')) {
+            const o = document.createElement('option');
+            o.value = connId;
+            o.textContent = chatSel.options[i].textContent;
+            sel.appendChild(o);
+        }
+    }
+
+    // If a DB was previously selected, keep it
+    if (adminSelectedDb) {
+        sel.value = String(adminSelectedDb);
+        if (sel.value) loadAdminUsersForDb();
+    }
+}
+
+async function loadAdminUsersForDb() {
+    const connId = document.getElementById('adminDbSelector').value;
     const listEl = document.getElementById('adminUserList');
+
+    if (!connId) {
+        listEl.innerHTML = '<p class="text-sm text-d-muted p-6">Select a database above to manage user permissions.</p>';
+        adminSelectedDb = null;
+        return;
+    }
+
+    adminSelectedDb = parseInt(connId);
     listEl.innerHTML = '<p class="text-sm text-d-muted p-6">Loading users…</p>';
+
     try {
-        const r = await authFetch(`${chatUrl()}/api/auth/users`);
-        if (!r.ok) throw new Error('Failed to load users');
+        const r = await authFetch(`${chatUrl()}/api/auth/users/db/${connId}`);
+        if (!r.ok) {
+            const d = await r.json().catch(() => ({}));
+            throw new Error(d.detail || 'Failed to load users');
+        }
         adminUsers = await r.json();
         renderAdminUsers();
     } catch(e) {
@@ -668,7 +883,7 @@ function renderAdminUsers() {
     }
 
     const permDefs = [
-        { key: 'db_onboard', cls: 'onboard', label: 'Onboard' },
+        { key: 'db_onboard', cls: 'onboard', label: 'Admin' },
         { key: 'db_reindex', cls: 'reindex', label: 'Reindex' },
         { key: 'prompt_query', cls: 'query', label: 'Query' },
     ];
@@ -689,6 +904,13 @@ function renderAdminUsers() {
             h += `</div>`;
         });
 
+        // View Logs button (global admins can view any user's logs)
+        if (_isGlobalAdmin()) {
+            h += `<button onclick="openUserActivityModal(${user.id}, '${esc(user.username)}')" class="text-[10px] px-2 py-1 rounded border border-d-border text-d-muted hover:text-white hover:border-d-accent transition" style="width:70px" title="View this user's activity log">📋 Logs</button>`;
+        } else {
+            h += `<span style="width:70px"></span>`;
+        }
+
         h += `<span class="save-status" id="save-${user.id}" style="width:60px;text-align:center">✓ Saved</span>`;
         h += `</div>`;
     });
@@ -696,28 +918,23 @@ function renderAdminUsers() {
 }
 
 async function togglePerm(userId, perm, btnEl) {
-    // Find user in local state
     const user = adminUsers.find(u => u.id === userId);
-    if (!user) return;
+    if (!user || !adminSelectedDb) return;
 
     // Toggle permission locally
     const idx = user.permissions.indexOf(perm);
-    if (idx >= 0) {
-        user.permissions.splice(idx, 1);
-    } else {
-        user.permissions.push(perm);
-    }
+    if (idx >= 0) user.permissions.splice(idx, 1);
+    else user.permissions.push(perm);
 
-    // Update button appearance
     const has = user.permissions.includes(perm);
     btnEl.classList.toggle('on', has);
     btnEl.classList.toggle('off', !has);
 
-    // Save to backend
+    // Save to backend (per-DB)
     try {
-        const r = await authFetch(`${chatUrl()}/api/auth/users/${userId}/permissions`, {
+        const r = await authFetch(`${chatUrl()}/api/auth/users/${userId}/db-permissions`, {
             method: 'PUT',
-            body: JSON.stringify({ permissions: user.permissions }),
+            body: JSON.stringify({ connection_id: adminSelectedDb, permissions: user.permissions }),
         });
         if (!r.ok) {
             const d = await r.json().catch(() => ({}));
@@ -732,12 +949,6 @@ async function togglePerm(userId, perm, btnEl) {
             saveEl.classList.add('show');
             setTimeout(() => saveEl.classList.remove('show'), 1500);
         }
-
-        // Update own badge if editing self
-        if (currentUser && parseInt(currentUser.sub || 0) === userId) {
-            currentUser.permissions = data.permissions;
-            renderUserBadge();
-        }
     } catch(e) {
         // Revert on error
         if (has) { user.permissions.splice(user.permissions.indexOf(perm), 1); }
@@ -748,7 +959,807 @@ async function togglePerm(userId, perm, btnEl) {
     }
 }
 
+// ═════════════════════════════════════════════════════
+//  ACTIVITY LOG (user-scoped + admin global)
+// ═════════════════════════════════════════════════════
+let activityOffset = 0;
+const ACTIVITY_LIMIT = 50;
+let activityDebounceTimer = null;
+let activityScope = 'me';  // 'me' = own logs, 'all' = global (admin only)
+
+function initActivityTab() {
+    const isAdmin = _isGlobalAdmin();
+
+    // Show scope toggle only for global admins
+    const scopeToggle = document.getElementById('activityScopeToggle');
+    if (scopeToggle) scopeToggle.style.display = isAdmin ? '' : 'none';
+
+    // Show/hide DB & User filters depending on scope
+    const dbFilter = document.getElementById('activityDbFilter')?.closest('div');
+    const userFilter = document.getElementById('activityUserFilter')?.closest('div');
+    if (!isAdmin) {
+        activityScope = 'me';
+        if (dbFilter) dbFilter.style.display = '';
+        if (userFilter) userFilter.style.display = 'none';
+    }
+
+    setActivityScope(isAdmin ? activityScope : 'me');
+}
+
+function setActivityScope(scope) {
+    activityScope = scope;
+    activityOffset = 0;
+    const isAdmin = _isGlobalAdmin();
+
+    // Update scope buttons
+    const meBtn = document.getElementById('scopeMe');
+    const allBtn = document.getElementById('scopeAll');
+    if (meBtn && allBtn) {
+        meBtn.className = `px-3 py-1 text-xs font-medium ${scope === 'me' ? 'bg-d-accent text-white' : 'bg-d-card text-d-muted hover:text-white'}`;
+        allBtn.className = `px-3 py-1 text-xs font-medium ${scope === 'all' ? 'bg-d-accent text-white' : 'bg-d-card text-d-muted hover:text-white'}`;
+    }
+
+    // Update title
+    const title = document.getElementById('activityTitle');
+    const subtitle = document.getElementById('activitySubtitle');
+    if (scope === 'me') {
+        if (title) title.textContent = 'My Activity';
+        if (subtitle) subtitle.textContent = 'Your personal activity trail — every action you\'ve performed.';
+    } else {
+        if (title) title.textContent = 'All Activity';
+        if (subtitle) subtitle.textContent = 'System-wide audit log — every user action across all databases.';
+    }
+
+    // Show/hide user filter (only in 'all' scope)
+    const userFilter = document.getElementById('activityUserFilter')?.closest('div');
+    if (userFilter) userFilter.style.display = (scope === 'all' && isAdmin) ? '' : 'none';
+
+    populateActivityDbFilter();
+    loadActivityLog();
+}
+
+function populateActivityDbFilter() {
+    const sel = document.getElementById('activityDbFilter');
+    if (!sel) return;
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">All Databases</option>';
+    const chatSel = document.getElementById('dbSelector');
+    for (let i = 0; i < chatSel.options.length; i++) {
+        const v = chatSel.options[i].value;
+        if (!v) continue;
+        const o = document.createElement('option');
+        o.value = v;
+        o.textContent = chatSel.options[i].textContent;
+        sel.appendChild(o);
+    }
+    if (prev) sel.value = prev;
+}
+
+function onActivityFilterChange() {
+    activityOffset = 0;
+    loadActivityLog();
+}
+
+function debounceActivityLoad() {
+    clearTimeout(activityDebounceTimer);
+    activityDebounceTimer = setTimeout(() => { activityOffset = 0; loadActivityLog(); }, 400);
+}
+
+async function loadActivityLog() {
+    const connId = document.getElementById('activityDbFilter')?.value || '';
+    const action = document.getElementById('activityActionFilter')?.value || '';
+    const status = document.getElementById('activityStatusFilter')?.value || '';
+    const hours  = document.getElementById('activityTimeFilter')?.value || '24';
+    const user   = document.getElementById('activityUserFilter')?.value.trim() || '';
+
+    const logList = document.getElementById('activityLogList');
+    if (!logList) return;
+    logList.innerHTML = '<p class="text-sm text-d-muted p-6">Loading activity…</p>';
+
+    // Build URL based on scope
+    let url;
+    if (activityScope === 'me') {
+        url = `${chatUrl()}/api/activity/me`;
+    } else if (connId) {
+        url = `${chatUrl()}/api/activity/db/${connId}`;
+    } else {
+        url = `${chatUrl()}/api/activity/global`;
+    }
+    const params = new URLSearchParams();
+    if (action) params.set('action', action);
+    if (status) params.set('status', status);
+    if (hours)  params.set('hours', hours);
+    if (user && activityScope === 'all')   params.set('username', user);
+    if (connId) params.set('connection_id', connId);
+    params.set('limit', ACTIVITY_LIMIT);
+    params.set('offset', activityOffset);
+    url += '?' + params.toString();
+
+    try {
+        const r = await authFetch(url);
+        if (!r.ok) {
+            const d = await r.json().catch(() => ({}));
+            throw new Error(d.detail || `HTTP ${r.status}`);
+        }
+        const data = await r.json();
+        renderActivityLog(data);
+        renderActivityPagination(data.total || 0);
+    } catch(e) {
+        logList.innerHTML = `<p class="text-sm text-red-400 p-6">${esc(e.message)}</p>`;
+    }
+
+    // Also load stats
+    loadActivityStats(connId);
+}
+
+function renderActivityLog(data) {
+    const logList = document.getElementById('activityLogList');
+    const logs = data.logs || [];
+    if (!logs.length) {
+        logList.innerHTML = '<p class="text-sm text-d-muted p-6">No activity found for the selected filters.</p>';
+        return;
+    }
+
+    let h = '';
+    logs.forEach(log => {
+        const ts = new Date(log.created_at);
+        const timeStr = ts.toLocaleString(undefined, { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', second:'2-digit' });
+        const relTime = relativeTime(ts);
+
+        // Parse detail
+        let detailHtml = '';
+        if (log.detail) {
+            try {
+                const d = typeof log.detail === 'string' ? JSON.parse(log.detail) : log.detail;
+                const entries = Object.entries(d).slice(0, 4);
+                detailHtml = entries.map(([k,v]) => {
+                    const val = typeof v === 'string' ? v : JSON.stringify(v);
+                    return `<span class="text-d-muted">${esc(k)}:</span> ${esc(String(val).substring(0,80))}`;
+                }).join(' · ');
+                if (Object.keys(d).length > 4) detailHtml += ' …';
+            } catch { detailHtml = esc(String(log.detail).substring(0, 120)); }
+        }
+
+        const durStr = log.duration_ms != null ? `${log.duration_ms}ms` : '—';
+
+        h += `<div class="log-entry">`;
+        h += `<span class="log-time" title="${esc(ts.toISOString())}">${esc(relTime)}</span>`;
+        h += `<span class="log-user">${esc(log.username || '—')}</span>`;
+        h += `<span class="log-action">${esc(log.action)}</span>`;
+        h += `<span class="log-status ${log.status}">${esc(log.status)}</span>`;
+        h += `<span class="log-detail" title="Click to expand">${detailHtml || '—'}</span>`;
+        h += `<span class="log-dur">${durStr}</span>`;
+        h += `</div>`;
+    });
+    logList.innerHTML = h;
+}
+
+function renderActivityPagination(total) {
+    const pagEl = document.getElementById('activityPagination');
+    if (!pagEl) return;
+    if (total <= ACTIVITY_LIMIT && activityOffset === 0) {
+        pagEl.innerHTML = `<span class="text-xs text-d-muted">${total} entries</span>`;
+        return;
+    }
+    const page = Math.floor(activityOffset / ACTIVITY_LIMIT) + 1;
+    const totalPages = Math.ceil(total / ACTIVITY_LIMIT);
+    let h = '';
+    if (activityOffset > 0) {
+        h += `<button onclick="activityPage(-1)" class="px-3 py-1 text-xs rounded bg-d-card text-d-muted hover:text-white">← Prev</button>`;
+    }
+    h += `<span class="text-xs text-d-muted">Page ${page} of ${totalPages} (${total} entries)</span>`;
+    if (activityOffset + ACTIVITY_LIMIT < total) {
+        h += `<button onclick="activityPage(1)" class="px-3 py-1 text-xs rounded bg-d-card text-d-muted hover:text-white">Next →</button>`;
+    }
+    pagEl.innerHTML = h;
+}
+
+function activityPage(dir) {
+    activityOffset += dir * ACTIVITY_LIMIT;
+    if (activityOffset < 0) activityOffset = 0;
+    loadActivityLog();
+}
+
+async function loadActivityStats(connId) {
+    const statsEl = document.getElementById('activityStats');
+    if (!statsEl) return;
+
+    let url;
+    if (activityScope === 'me') {
+        url = `${chatUrl()}/api/activity/me/stats`;
+    } else {
+        url = `${chatUrl()}/api/activity/stats`;
+    }
+    const params = new URLSearchParams();
+    const hours = document.getElementById('activityTimeFilter')?.value || '24';
+    if (connId && activityScope !== 'me') params.set('connection_id', connId);
+    if (hours) params.set('hours', hours);
+    url += '?' + params.toString();
+
+    try {
+        const r = await authFetch(url);
+        if (!r.ok) { statsEl.innerHTML = ''; return; }
+        const data = await r.json();
+        renderActivityStats(data);
+    } catch {
+        statsEl.innerHTML = '';
+    }
+}
+
+function renderActivityStats(data) {
+    const statsEl = document.getElementById('activityStats');
+    if (!statsEl) return;
+
+    const totalActions = data.total_events || Object.values(data.by_action || {}).reduce((a,b) => a+b, 0);
+    const successCount = (data.by_status || {}).success || 0;
+    const failedCount  = (data.by_status || {}).failed || 0;
+    const deniedCount  = (data.by_status || {}).denied || 0;
+    const topUsers = data.top_users || [];
+    const topUser = topUsers.length ? topUsers[0] : null;
+
+    let h = '';
+    h += `<div class="stat-card"><span class="stat-val">${totalActions}</span><span class="stat-lbl">Total Actions</span></div>`;
+    h += `<div class="stat-card"><span class="stat-val" style="color:#34d399">${successCount}</span><span class="stat-lbl">Success</span></div>`;
+    h += `<div class="stat-card"><span class="stat-val" style="color:#f87171">${failedCount}</span><span class="stat-lbl">Failed</span></div>`;
+    h += `<div class="stat-card"><span class="stat-val" style="color:#fbbf24">${deniedCount}</span><span class="stat-lbl">Denied</span></div>`;
+    if (topUser) {
+        h += `<div class="stat-card"><span class="stat-val">${esc(topUser.username)}</span><span class="stat-lbl">Most Active (${topUser.count})</span></div>`;
+    }
+    statsEl.innerHTML = h;
+}
+
+function relativeTime(date) {
+    const now = new Date();
+    const diff = Math.floor((now - date) / 1000);
+    if (diff < 60) return `${diff}s ago`;
+    if (diff < 3600) return `${Math.floor(diff/60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff/3600)}h ago`;
+    return `${Math.floor(diff/86400)}d ago`;
+}
+
+// ═════════════════════════════════════════════════════
+//  USER ACTIVITY MODAL (admin: view any user's logs)
+// ═════════════════════════════════════════════════════
+let userModalUserId = null;
+let userModalUsername = '';
+let userModalOffset = 0;
+const USER_MODAL_LIMIT = 50;
+
+function openUserActivityModal(userId, username) {
+    userModalUserId = userId;
+    userModalUsername = username;
+    userModalOffset = 0;
+    document.getElementById('userModalTitle').textContent = `Activity: ${username}`;
+    document.getElementById('userModalSubtitle').textContent = `User ID ${userId} — complete action history`;
+    document.getElementById('userModalActionFilter').value = '';
+    document.getElementById('userModalTimeFilter').value = '24';
+    document.getElementById('userActivityModal').style.display = '';
+    loadUserModalActivity();
+    loadUserModalStats();
+}
+
+function closeUserActivityModal() {
+    document.getElementById('userActivityModal').style.display = 'none';
+    userModalUserId = null;
+}
+
+async function loadUserModalActivity() {
+    if (!userModalUserId) return;
+    const action = document.getElementById('userModalActionFilter')?.value || '';
+    const hours  = document.getElementById('userModalTimeFilter')?.value || '24';
+    const logList = document.getElementById('userModalLogList');
+    logList.innerHTML = '<p class="text-sm text-d-muted p-6">Loading…</p>';
+
+    const params = new URLSearchParams();
+    if (action) params.set('action', action);
+    if (hours)  params.set('hours', hours);
+    params.set('limit', USER_MODAL_LIMIT);
+    params.set('offset', userModalOffset);
+
+    const url = `${chatUrl()}/api/activity/user/${userModalUserId}?${params}`;
+    try {
+        const r = await authFetch(url);
+        if (!r.ok) { const d = await r.json().catch(()=>({})); throw new Error(d.detail || `HTTP ${r.status}`); }
+        const data = await r.json();
+        renderUserModalLogs(data);
+        renderUserModalPagination(data.total || 0);
+        document.getElementById('userModalCount').textContent = `${data.total} total`;
+    } catch(e) {
+        logList.innerHTML = `<p class="text-sm text-red-400 p-6">${esc(e.message)}</p>`;
+    }
+    loadUserModalStats();
+}
+
+function renderUserModalLogs(data) {
+    const logList = document.getElementById('userModalLogList');
+    const logs = data.logs || [];
+    if (!logs.length) {
+        logList.innerHTML = '<p class="text-sm text-d-muted p-6">No activity found for this user.</p>';
+        return;
+    }
+    let h = '';
+    logs.forEach(log => {
+        const ts = new Date(log.created_at);
+        const relTime = relativeTime(ts);
+        let detailHtml = '';
+        if (log.detail) {
+            try {
+                const d = typeof log.detail === 'string' ? JSON.parse(log.detail) : log.detail;
+                const entries = Object.entries(d).slice(0, 4);
+                detailHtml = entries.map(([k,v]) => {
+                    const val = typeof v === 'string' ? v : JSON.stringify(v);
+                    return `<span class="text-d-muted">${esc(k)}:</span> ${esc(String(val).substring(0,80))}`;
+                }).join(' · ');
+                if (Object.keys(d).length > 4) detailHtml += ' …';
+            } catch { detailHtml = esc(String(log.detail).substring(0, 120)); }
+        }
+        const durStr = log.duration_ms != null ? `${log.duration_ms}ms` : '—';
+        h += `<div class="log-entry-user">`;
+        h += `<span class="log-time" title="${esc(ts.toISOString())}">${esc(relTime)}</span>`;
+        h += `<span class="log-action">${esc(log.action)}</span>`;
+        h += `<span class="log-status ${log.status}">${esc(log.status)}</span>`;
+        h += `<span class="log-detail">${detailHtml || '—'}</span>`;
+        h += `<span class="log-dur">${durStr}</span>`;
+        h += `</div>`;
+    });
+    logList.innerHTML = h;
+}
+
+function renderUserModalPagination(total) {
+    const pagEl = document.getElementById('userModalPagination');
+    if (!pagEl) return;
+    if (total <= USER_MODAL_LIMIT && userModalOffset === 0) {
+        pagEl.innerHTML = `<span class="text-xs text-d-muted">${total} entries</span>`;
+        return;
+    }
+    const page = Math.floor(userModalOffset / USER_MODAL_LIMIT) + 1;
+    const totalPages = Math.ceil(total / USER_MODAL_LIMIT);
+    let h = '';
+    if (userModalOffset > 0) h += `<button onclick="userModalPage(-1)" class="px-3 py-1 text-xs rounded bg-d-card text-d-muted hover:text-white">← Prev</button>`;
+    h += `<span class="text-xs text-d-muted">Page ${page} of ${totalPages}</span>`;
+    if (userModalOffset + USER_MODAL_LIMIT < total) h += `<button onclick="userModalPage(1)" class="px-3 py-1 text-xs rounded bg-d-card text-d-muted hover:text-white">Next →</button>`;
+    pagEl.innerHTML = h;
+}
+
+function userModalPage(dir) {
+    userModalOffset += dir * USER_MODAL_LIMIT;
+    if (userModalOffset < 0) userModalOffset = 0;
+    loadUserModalActivity();
+}
+
+async function loadUserModalStats() {
+    if (!userModalUserId) return;
+    const statsEl = document.getElementById('userModalStats');
+    const hours = document.getElementById('userModalTimeFilter')?.value || '24';
+    try {
+        const r = await authFetch(`${chatUrl()}/api/activity/user/${userModalUserId}/stats?hours=${hours}`);
+        if (!r.ok) { statsEl.innerHTML = ''; return; }
+        const data = await r.json();
+        const s = data.by_status || {};
+        let h = '';
+        h += `<span class="text-xs font-semibold" style="color:#34d399">${s.success || 0} ✓</span>`;
+        h += `<span class="text-xs font-semibold" style="color:#f87171">${s.failed || 0} ✗</span>`;
+        h += `<span class="text-xs font-semibold" style="color:#fbbf24">${s.denied || 0} ⛔</span>`;
+        statsEl.innerHTML = h;
+    } catch { statsEl.innerHTML = ''; }
+}
+
 // ESC key closes modals
 document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') { closeChartModal(); closeDetailModal(); }
+    if (e.key === 'Escape') { closeChartModal(); closeDetailModal(); closeUserActivityModal(); closePinModal(); closeCreateDashboardModal(); }
 });
+
+// ═════════════════════════════════════════════════════
+//  DASHBOARD – List, Create, Open, Refresh, Delete
+// ═════════════════════════════════════════════════════
+
+async function loadDashboardsList() {
+    const grid = document.getElementById('dashboardGrid');
+    grid.innerHTML = '<p class="text-sm text-d-muted">Loading dashboards…</p>';
+
+    // Show list view, hide detail view
+    document.getElementById('dashboardListView').style.display = '';
+    document.getElementById('dashboardDetailView').style.display = 'none';
+
+    try {
+        const r = await authFetch(`${chatUrl()}/api/dashboards`);
+        if (!r.ok) throw new Error('Failed to load dashboards');
+        const dashboards = await r.json();
+
+        if (!dashboards.length) {
+            grid.innerHTML = `
+                <div class="col-span-full text-center py-16">
+                    <p class="text-4xl mb-3">📊</p>
+                    <p class="text-d-muted text-sm mb-2">No dashboards yet</p>
+                    <p class="text-d-muted text-xs mb-4">Create a dashboard and pin your favorite queries for quick access.</p>
+                    <button onclick="openCreateDashboardModal()" class="chip" style="font-size:13px;padding:8px 18px">＋ Create your first dashboard</button>
+                </div>`;
+            return;
+        }
+
+        let h = '';
+        dashboards.forEach(d => {
+            const updatedAgo = relativeTime(new Date(d.updated_at));
+            h += `<div class="bg-d-card border border-d-border rounded-xl p-5 cursor-pointer transition hover:border-d-accent" onclick="openDashboard(${d.id}, '${escAttr(d.name)}')">
+                <div class="flex items-center justify-between mb-2">
+                    <h3 class="text-sm font-semibold text-white truncate">${esc(d.name)}</h3>
+                    <span class="text-[10px] text-d-muted">${esc(updatedAgo)}</span>
+                </div>
+                ${d.description ? `<p class="text-xs text-d-muted mb-3 truncate">${esc(d.description)}</p>` : ''}
+                <div class="flex items-center gap-2">
+                    <span class="text-xs text-d-accent font-semibold">${d.pin_count}</span>
+                    <span class="text-xs text-d-muted">pinned ${d.pin_count === 1 ? 'query' : 'queries'}</span>
+                </div>
+            </div>`;
+        });
+        grid.innerHTML = h;
+    } catch (e) {
+        grid.innerHTML = `<p class="text-sm text-red-400">${esc(e.message)}</p>`;
+    }
+}
+
+function escAttr(s) { return (s||'').replace(/'/g, "\\'").replace(/"/g, '&quot;'); }
+
+function openCreateDashboardModal() {
+    document.getElementById('newDashName').value = '';
+    document.getElementById('newDashDesc').value = '';
+    document.getElementById('createDashError').textContent = '';
+    document.getElementById('createDashboardModal').classList.add('open');
+    setTimeout(() => document.getElementById('newDashName').focus(), 100);
+}
+
+function closeCreateDashboardModal() {
+    document.getElementById('createDashboardModal').classList.remove('open');
+}
+
+async function submitCreateDashboard() {
+    const name = document.getElementById('newDashName').value.trim();
+    const desc = document.getElementById('newDashDesc').value.trim();
+    const errEl = document.getElementById('createDashError');
+    errEl.textContent = '';
+
+    if (!name) { errEl.textContent = 'Please enter a dashboard name'; return; }
+
+    const btn = document.getElementById('createDashBtn');
+    btn.disabled = true; btn.textContent = 'Creating…';
+    try {
+        const r = await authFetch(`${chatUrl()}/api/dashboards`, {
+            method: 'POST',
+            body: JSON.stringify({ name, description: desc || null }),
+        });
+        if (!r.ok) { const d = await r.json().catch(()=>({})); throw new Error(d.detail || 'Failed to create'); }
+        closeCreateDashboardModal();
+        loadDashboardsList();
+    } catch (e) {
+        errEl.textContent = e.message;
+    } finally {
+        btn.disabled = false; btn.textContent = 'Create Dashboard';
+    }
+}
+
+async function openDashboard(id, name) {
+    currentDashboardId = id;
+    document.getElementById('dashboardListView').style.display = 'none';
+    document.getElementById('dashboardDetailView').style.display = '';
+    document.getElementById('dashboardDetailTitle').textContent = name || 'Dashboard';
+    document.getElementById('dashboardLastUpdated').textContent = '';
+    document.getElementById('dashboardPinsGrid').innerHTML = '<p class="text-sm text-d-muted p-4">Loading pins…</p>';
+    document.getElementById('dashboardEmpty').classList.add('hidden');
+
+    await refreshCurrentDashboard();
+}
+
+function showDashboardList() {
+    currentDashboardId = null;
+    // Destroy any pin chart instances and clear pin data
+    Object.values(dashboardPinCharts).forEach(c => { try { c.destroy(); } catch(_){} });
+    dashboardPinCharts = {};
+    dashboardPinData = {};
+    document.getElementById('dashboardDetailView').style.display = 'none';
+    document.getElementById('dashboardListView').style.display = '';
+    loadDashboardsList();
+}
+
+async function refreshCurrentDashboard() {
+    if (!currentDashboardId) return;
+    const grid = document.getElementById('dashboardPinsGrid');
+    const emptyEl = document.getElementById('dashboardEmpty');
+    const refreshBtn = document.getElementById('dashboardRefreshBtn');
+
+    refreshBtn.disabled = true; refreshBtn.textContent = '⏳ Refreshing…';
+
+    // Destroy old chart instances and clear stored pin data
+    Object.values(dashboardPinCharts).forEach(c => { try { c.destroy(); } catch(_){} });
+    dashboardPinCharts = {};
+    dashboardPinData = {};
+
+    try {
+        const r = await authFetch(`${chatUrl()}/api/dashboards/${currentDashboardId}/refresh`, { method: 'POST' });
+        if (!r.ok) { const d = await r.json().catch(()=>({})); throw new Error(d.detail || 'Refresh failed'); }
+        const pins = await r.json();
+
+        if (!pins.length) {
+            grid.innerHTML = '';
+            emptyEl.classList.remove('hidden');
+            document.getElementById('dashboardLastUpdated').textContent = '';
+            return;
+        }
+
+        emptyEl.classList.add('hidden');
+        document.getElementById('dashboardLastUpdated').textContent = '🟢 Updated now';
+        // Start fading the "Updated now" text
+        startDashboardTimer();
+
+        let h = '';
+        pins.forEach(pin => {
+            const canvasId = 'pin-chart-' + pin.pin_id;
+            const statusColor = pin.status === 'success' ? '#34d399' : pin.status === 'denied' ? '#fbbf24' : '#f87171';
+            const statusIcon = pin.status === 'success' ? '✓' : pin.status === 'denied' ? '⛔' : '✗';
+            const statusText = pin.status === 'success' ? `${pin.row_count} rows · ${(pin.execution_time_ms/1000).toFixed(1)}s` : (pin.error || pin.status);
+
+            h += `<div class="bg-d-card border border-d-border rounded-xl overflow-hidden" id="pin-card-${pin.pin_id}">
+                <div class="flex items-center justify-between px-4 py-3 border-b border-d-border">
+                    <div class="flex items-center gap-2 min-w-0">
+                        <span class="text-sm">${pin.chart_type === 'table' ? '📋' : '📌'}</span>
+                        <span class="text-sm font-semibold text-white truncate">${esc(pin.pin_name)}</span>
+                        ${pin.chart_type === 'table' ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-d-input text-d-muted border border-d-border">TABLE</span>' : ''}
+                    </div>
+                    <div class="flex items-center gap-2 shrink-0">
+                        <span class="text-[10px] font-semibold" style="color:${statusColor}">${statusIcon} ${esc(statusText)}</span>
+                        <button onclick="removePin(${pin.pin_id})" class="text-d-muted hover:text-red-400 text-xs" title="Remove pin">✕</button>
+                    </div>
+                </div>`;
+
+            if (pin.status === 'success' && pin.chart_type !== 'table') {
+                h += `<div class="px-4 py-3" style="height:280px"><canvas id="${canvasId}" style="width:100%;height:100%"></canvas></div>`;
+            }
+
+            if (pin.status === 'success' && pin.rows?.length && pin.columns?.length) {
+                const maxPinRows = pin.chart_type === 'table' ? 20 : 8;
+                const maxH = pin.chart_type === 'table' ? '400px' : '200px';
+                const showRows = pin.rows.slice(0, maxPinRows);
+                h += `<div class="px-4 pb-3" style="max-height:${maxH};overflow:auto">
+                    <table class="dt"><thead><tr>${pin.columns.map(c=>`<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>`;
+                showRows.forEach(row => {
+                    h += '<tr>';
+                    pin.columns.forEach(c => {
+                        const v = row[c]; const s = v != null ? String(v) : '—';
+                        const isN = typeof v==='number'||(typeof v==='string'&&v!==''&&!isNaN(+v)&&isFinite(v));
+                        h += `<td${isN?' class="num"':''}>${esc(s)}</td>`;
+                    });
+                    h += '</tr>';
+                });
+                h += '</tbody></table></div>';
+                if (pin.rows.length > maxPinRows) h += `<p class="text-[10px] text-d-muted px-4 pb-2">Showing ${maxPinRows} of ${pin.row_count} rows</p>`;
+            }
+
+            if (pin.status !== 'success') {
+                h += `<div class="px-4 py-6 text-center"><span class="text-xs" style="color:${statusColor}">${esc(pin.error || 'Error refreshing this pin')}</span></div>`;
+            }
+
+            // Footer with explore button + prompt
+            h += `<div class="px-4 py-2 border-t border-d-border flex items-center gap-2">`;
+            if (pin.status === 'success' && pin.rows?.length) {
+                h += `<button onclick="openPinDetailModal(${pin.pin_id})" class="chip shrink-0" style="font-size:10px;padding:3px 8px">🔍 Explore (${pin.row_count} rows)</button>`;
+            }
+            h += `<p class="text-[10px] text-d-muted truncate flex-1" title="${escAttr(pin.prompt)}">💬 ${esc(pin.prompt)}</p>
+            </div>`;
+
+            h += `</div>`;
+        });
+
+        grid.innerHTML = h;
+
+        // Store pin data for explore modals
+        pins.forEach(pin => {
+            if (pin.status === 'success' && pin.rows?.length && pin.columns?.length) {
+                dashboardPinData[pin.pin_id] = { columns: pin.columns, rows: pin.rows };
+            }
+        });
+
+        // Render charts for each pin
+        requestAnimationFrame(() => {
+            pins.forEach(pin => {
+                if (pin.status !== 'success' || pin.chart_type === 'table') return;
+                const canvas = document.getElementById('pin-chart-' + pin.pin_id);
+                if (!canvas) return;
+                try {
+                    let config = pin.chart_config ? JSON.parse(pin.chart_config) : null;
+                    if (config && pin.rows?.length) {
+                        // Replace stored data with fresh data
+                        config.data = pin.rows.map(r => {
+                            const o = {};
+                            for (const [k,v] of Object.entries(r)) o[k] = typeof v==='string'&&v!==''&&!isNaN(+v)&&isFinite(v) ? +v : v;
+                            return o;
+                        });
+                    }
+                    if (config) {
+                        const chart = renderChart(canvas, pin.chart_type, config);
+                        if (chart) dashboardPinCharts['pin-chart-' + pin.pin_id] = chart;
+                    }
+                } catch (e) {
+                    console.warn('Pin chart render error:', pin.pin_id, e);
+                }
+            });
+        });
+    } catch (e) {
+        grid.innerHTML = `<p class="text-sm text-red-400 p-4">${esc(e.message)}</p>`;
+    } finally {
+        refreshBtn.disabled = false; refreshBtn.textContent = '↻ Refresh All';
+    }
+}
+
+let dashboardTimerInterval = null;
+let dashboardRefreshTime = null;
+
+function startDashboardTimer() {
+    dashboardRefreshTime = new Date();
+    if (dashboardTimerInterval) clearInterval(dashboardTimerInterval);
+    dashboardTimerInterval = setInterval(() => {
+        const el = document.getElementById('dashboardLastUpdated');
+        if (!el || !dashboardRefreshTime) return;
+        const ago = relativeTime(dashboardRefreshTime);
+        el.textContent = `Updated ${ago}`;
+    }, 30000);
+}
+
+async function deleteCurrentDashboard() {
+    if (!currentDashboardId) return;
+    if (!confirm('Delete this dashboard and all its pins?')) return;
+    try {
+        await authFetch(`${chatUrl()}/api/dashboards/${currentDashboardId}`, { method: 'DELETE' });
+        showDashboardList();
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+async function removePin(pinId) {
+    if (!confirm('Remove this pin from the dashboard?')) return;
+    try {
+        await authFetch(`${chatUrl()}/api/dashboards/pins/${pinId}`, { method: 'DELETE' });
+        const card = document.getElementById('pin-card-' + pinId);
+        if (card) card.remove();
+        // Destroy chart instance
+        if (dashboardPinCharts['pin-chart-' + pinId]) {
+            dashboardPinCharts['pin-chart-' + pinId].destroy();
+            delete dashboardPinCharts['pin-chart-' + pinId];
+        }
+        // Check if grid is now empty
+        const grid = document.getElementById('dashboardPinsGrid');
+        if (grid && !grid.children.length) {
+            document.getElementById('dashboardEmpty').classList.remove('hidden');
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+
+// ═════════════════════════════════════════════════════
+//  PIN MODAL – pin a chat result/chart to a dashboard
+// ═════════════════════════════════════════════════════
+
+function pinCurrentChart() {
+    // Called from the 📌 button inside the chart modal
+    openPinModal(
+        pinContext.prompt,
+        pinContext.sql,
+        pinContext.chartType,
+        pinContext.chartConfig,
+        pinContext.chartTitle,
+    );
+}
+
+async function openPinModal(prompt, sql, chartType, chartConfig, defaultName) {
+    if (!sql) { alert('No SQL to pin — run a query first.'); return; }
+
+    // Store context for submit
+    pinContext.prompt = prompt;
+    pinContext.sql = sql;
+    pinContext.chartType = chartType || 'table';
+    pinContext.chartConfig = chartConfig || null;
+
+    // Pre-fill name
+    document.getElementById('pinName').value = defaultName || (prompt || '').substring(0, 60);
+    document.getElementById('pinError').textContent = '';
+
+    // Load user's dashboards into dropdown
+    const sel = document.getElementById('pinDashboardSelect');
+    sel.innerHTML = '<option value="__new__">＋ Create new dashboard</option>';
+    try {
+        const r = await authFetch(`${chatUrl()}/api/dashboards`);
+        if (r.ok) {
+            const dashboards = await r.json();
+            dashboards.forEach(d => {
+                const o = document.createElement('option');
+                o.value = d.id;
+                o.textContent = d.name + (d.pin_count ? ` (${d.pin_count} pins)` : '');
+                sel.appendChild(o);
+            });
+        }
+    } catch (_) {}
+
+    onPinDashboardChange();
+    document.getElementById('pinModal').classList.add('open');
+    setTimeout(() => document.getElementById('pinName').focus(), 100);
+}
+
+function closePinModal() {
+    document.getElementById('pinModal').classList.remove('open');
+}
+
+function onPinDashboardChange() {
+    const isNew = document.getElementById('pinDashboardSelect').value === '__new__';
+    document.getElementById('pinNewDashboardWrap').style.display = isNew ? '' : 'none';
+}
+
+async function submitPin() {
+    const pinName = document.getElementById('pinName').value.trim();
+    const errEl = document.getElementById('pinError');
+    errEl.textContent = '';
+
+    if (!pinName) { errEl.textContent = 'Please enter a pin name'; return; }
+    if (!pinContext.sql) { errEl.textContent = 'No SQL available to pin'; return; }
+
+    const btn = document.getElementById('pinSubmitBtn');
+    btn.disabled = true; btn.textContent = 'Pinning…';
+
+    try {
+        let dashboardId = document.getElementById('pinDashboardSelect').value;
+
+        // Create new dashboard if needed
+        if (dashboardId === '__new__') {
+            const newName = document.getElementById('pinNewDashboardName').value.trim();
+            if (!newName) { errEl.textContent = 'Please enter a name for the new dashboard'; btn.disabled = false; btn.textContent = '📌 Pin It'; return; }
+
+            const cr = await authFetch(`${chatUrl()}/api/dashboards`, {
+                method: 'POST',
+                body: JSON.stringify({ name: newName }),
+            });
+            if (!cr.ok) { const d = await cr.json().catch(()=>({})); throw new Error(d.detail || 'Failed to create dashboard'); }
+            const newDash = await cr.json();
+            dashboardId = newDash.id;
+        }
+
+        // Add pin
+        const pr = await authFetch(`${chatUrl()}/api/dashboards/${dashboardId}/pins`, {
+            method: 'POST',
+            body: JSON.stringify({
+                connection_id: selectedConnId,
+                pin_name: pinName,
+                prompt: pinContext.prompt || '',
+                sql: pinContext.sql,
+                chart_type: pinContext.chartType || 'table',
+                chart_config: pinContext.chartConfig || null,
+            }),
+        });
+        if (!pr.ok) { const d = await pr.json().catch(()=>({})); throw new Error(d.detail || 'Failed to add pin'); }
+
+        closePinModal();
+        closeChartModal();
+
+        // Show success toast
+        showToast('📌 Pinned to dashboard!');
+    } catch (e) {
+        errEl.textContent = e.message;
+    } finally {
+        btn.disabled = false; btn.textContent = '📌 Pin It';
+    }
+}
+
+// ═════════════════════════════════════════════════════
+//  TOAST NOTIFICATION
+// ═════════════════════════════════════════════════════
+function showToast(message) {
+    let toast = document.getElementById('dbchat-toast');
+    if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'dbchat-toast';
+        toast.style.cssText = 'position:fixed;bottom:24px;right:24px;z-index:999;background:#1b1e27;border:1px solid #7c6eff;color:#dfe1e8;padding:12px 20px;border-radius:10px;font-size:13px;font-weight:500;opacity:0;transition:opacity .3s;pointer-events:none;box-shadow:0 8px 30px rgba(0,0,0,.4)';
+        document.body.appendChild(toast);
+    }
+    toast.textContent = message;
+    toast.style.opacity = '1';
+    setTimeout(() => { toast.style.opacity = '0'; }, 2500);
+}

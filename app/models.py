@@ -176,7 +176,9 @@ class User(Base):
 
 class UserPermission(Base):
     """
-    Many-to-many-style permission table.
+    Per-database permission table.
+    connection_id = NULL  →  global permission (can onboard new databases)
+    connection_id = X     →  permission scoped to connection X
     Valid permission values: db_onboard, db_reindex, prompt_query
     """
     __tablename__ = "user_permissions"
@@ -184,6 +186,141 @@ class UserPermission(Base):
     id = SA_Column(Integer, primary_key=True)
     user_id = SA_Column(Integer, SA_ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     permission = SA_Column(String(50), nullable=False)  # db_onboard | db_reindex | prompt_query
+    connection_id = SA_Column(Integer, SA_ForeignKey("connections.id", ondelete="CASCADE"), nullable=True)
     created_at = SA_Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="permissions")
+    connection = relationship("Connection")
+
+
+# ============================================================================
+# ACTIVITY LOG
+# ============================================================================
+
+class ActivityLog(Base):
+    """
+    Comprehensive activity log – every significant action is recorded here.
+
+    Actions follow the pattern:  <resource>.<verb>
+    ─────────────────────────────────────────────────
+    auth.login              – User logged in
+    auth.login_failed       – Bad credentials
+    auth.signup             – New account created
+    auth.token_refresh      – /me endpoint hit
+
+    chat.query              – Natural language chat query
+    chat.query_failed       – Chat query failed
+    chat.execute            – Direct SQL execution
+    chat.execute_failed     – Direct SQL execution failed
+
+    admin.register_db       – New database registered
+    admin.list_databases    – Databases listed
+    admin.reindex           – Reindex triggered
+    admin.view_audit        – Audit log viewed
+    admin.view_summaries    – Table summaries viewed
+    admin.update_summary    – Table summary edited
+    admin.refresh_embeddings – Data embeddings refreshed
+
+    perm.view_users         – User list viewed (global)
+    perm.view_db_users      – User list for DB viewed
+    perm.update             – Permission changed for user on DB
+    perm.denied             – Permission denied (any route)
+    """
+    __tablename__ = "activity_logs"
+
+    id = SA_Column(Integer, primary_key=True)
+    user_id = SA_Column(Integer, SA_ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    username = SA_Column(String(100), nullable=True)          # denormalized for fast reads
+    action = SA_Column(String(80), nullable=False, index=True)  # e.g. "chat.query"
+    resource_type = SA_Column(String(50), nullable=True)       # e.g. "connection", "user", "table"
+    resource_id = SA_Column(Integer, nullable=True)            # PK of the affected resource
+    connection_id = SA_Column(Integer, SA_ForeignKey("connections.id", ondelete="SET NULL"), nullable=True)
+    status = SA_Column(String(20), nullable=False, default="success")  # success | failed | denied
+    detail = SA_Column(Text, nullable=True)                    # JSON blob with extra context
+    ip_address = SA_Column(String(45), nullable=True)          # IPv4 or IPv6
+    user_agent = SA_Column(String(512), nullable=True)
+    duration_ms = SA_Column(Integer, nullable=True)            # how long the operation took
+    created_at = SA_Column(DateTime, default=datetime.utcnow, index=True)
+
+    user = relationship("User", foreign_keys=[user_id])
+    connection = relationship("Connection", foreign_keys=[connection_id])
+
+
+# ============================================================================
+# CHAT HISTORY  –  persistent per-user chat messages
+# ============================================================================
+
+class ChatHistory(Base):
+    """
+    Stores every chat interaction so users see their own previous prompts
+    and results when they log back in.
+    Rows/columns are stored as JSON text (limited to first 50 rows).
+    """
+    __tablename__ = "chat_history"
+
+    id = SA_Column(Integer, primary_key=True)
+    user_id = SA_Column(Integer, SA_ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    connection_id = SA_Column(Integer, SA_ForeignKey("connections.id", ondelete="CASCADE"), nullable=False, index=True)
+    prompt = SA_Column(Text, nullable=False)
+    answer = SA_Column(Text, nullable=True)
+    sql = SA_Column(Text, nullable=True)
+    columns = SA_Column(Text, nullable=True)           # JSON array of column names
+    rows = SA_Column(Text, nullable=True)               # JSON array of row dicts (max 50)
+    row_count = SA_Column(Integer, nullable=True)
+    execution_time_ms = SA_Column(Integer, nullable=True)
+    selected_tables = SA_Column(Text, nullable=True)    # JSON array of table names
+    status = SA_Column(String(20), nullable=False, default="success")  # success | error
+    error_message = SA_Column(Text, nullable=True)
+    created_at = SA_Column(DateTime, default=datetime.utcnow, index=True)
+
+    user = relationship("User", foreign_keys=[user_id])
+    connection = relationship("Connection", foreign_keys=[connection_id])
+
+
+# ============================================================================
+# DASHBOARDS  –  pinned query/chart cards for quick re-run
+# ============================================================================
+
+class Dashboard(Base):
+    """
+    A named collection of pinned queries/charts owned by a single user.
+    One user can have many dashboards; each dashboard holds many pins.
+    """
+    __tablename__ = "dashboards"
+
+    id = SA_Column(Integer, primary_key=True)
+    user_id = SA_Column(Integer, SA_ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = SA_Column(String(255), nullable=False)
+    description = SA_Column(Text, nullable=True)
+    created_at = SA_Column(DateTime, default=datetime.utcnow)
+    updated_at = SA_Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User", foreign_keys=[user_id])
+    pins = relationship("DashboardPin", back_populates="dashboard", cascade="all, delete",
+                        order_by="DashboardPin.position")
+
+
+class DashboardPin(Base):
+    """
+    A single pinned query+chart on a dashboard.
+
+    Stores the original prompt, the generated SQL, and the chart configuration
+    so the dashboard can re-execute the SQL for live data and re-render the
+    exact same chart type without calling the viz-service again.
+    """
+    __tablename__ = "dashboard_pins"
+
+    id = SA_Column(Integer, primary_key=True)
+    dashboard_id = SA_Column(Integer, SA_ForeignKey("dashboards.id", ondelete="CASCADE"), nullable=False, index=True)
+    connection_id = SA_Column(Integer, SA_ForeignKey("connections.id", ondelete="CASCADE"), nullable=False)
+    pin_name = SA_Column(String(255), nullable=False)           # user-given label
+    prompt = SA_Column(Text, nullable=False)                     # original NL prompt
+    sql = SA_Column(Text, nullable=False)                        # generated SQL to re-run
+    chart_type = SA_Column(String(50), nullable=False)           # bar | line | pie | scatter | area | table
+    chart_config = SA_Column(Text, nullable=True)                # JSON – full viz-service rec config
+    position = SA_Column(Integer, default=0)                     # ordering within dashboard
+    last_run_at = SA_Column(DateTime, nullable=True)             # when SQL was last executed
+    created_at = SA_Column(DateTime, default=datetime.utcnow)
+
+    dashboard = relationship("Dashboard", back_populates="pins")
+    connection = relationship("Connection")
