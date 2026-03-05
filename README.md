@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/DbChat-v12.1-7c6eff?style=for-the-badge&logo=postgresql&logoColor=white" alt="DbChat v12.1"/>
+  <img src="https://img.shields.io/badge/DbChat-v14.0-7c6eff?style=for-the-badge&logo=postgresql&logoColor=white" alt="DbChat v14.0"/>
   <img src="https://img.shields.io/badge/Python-3.11+-3776ab?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.11+"/>
   <img src="https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white" alt="FastAPI"/>
   <img src="https://img.shields.io/badge/LLM--Powered-Qwen3--Coder-ff6f00?style=for-the-badge&logo=openai&logoColor=white" alt="LLM Powered"/>
@@ -60,6 +60,8 @@ Business teams drown in data they **can't access**. Every "quick question" — *
 | 🧠 | **Two-Step Reasoning Mode** | The LLM first reasons about which tables and joins are needed, then generates SQL — dramatically improving accuracy on complex multi-table queries. |
 | 🗂️ | **Catalog Queries** | Ask structural questions like *"What tables exist?"*, *"Describe the orders table"* — handled directly from indexed metadata without SQL generation. |
 | 🔗 | **Foreign Key Auto-Detection** | FKs are extracted during indexing and injected into every SQL prompt — the LLM generates correct JOINs without guessing. |
+| 🧵 | **Thread-Based Conversations** | Messages are organized into threads with auto-generated titles. Start new threads, switch between conversations, and continue context from previous messages — just like a chat app. |
+| 👋 | **Smart Onboarding** | When you connect to a database, the LLM analyzes every table and generates a plain-English summary of the database plus 7 diverse starter queries — so new users instantly know what to ask. |
 | 🗄️ | **Multi-DB Support** | Connect PostgreSQL, MySQL, or SQL Server databases. Register as many as needed; each has its own schema index and permission scope. |
 
 ---
@@ -107,15 +109,17 @@ Business teams drown in data they **can't access**. Every "quick question" — *
 │  │ database_id  │  │    │ user_id (FK) │  │    │ user_id (FK) │─────────────┘       │
 │  │   (FK)       │  │    │ action       │  │    │ connection_id│                     │
 │  │ name         │  │    │ detail       │  │    │   (FK)       │                     │
-│  │ summary      │  │    │ connection_id│  │    │ prompt       │                     │
-│  │ embedding_id │  │    │ ip_address   │  │    │ answer       │                     │
-│  │ row_count    │  │    │ user_agent   │  │    │ sql_generated│                     │
-│  │ indexed      │  │    │ duration_ms  │  │    │ columns_json │                     │
-│  └──────┬───────┘  │    │ status       │  │    │ rows_json    │                     │
-│         │          │    │ created_at   │  │    │ execution_ms │                     │
-│         │ 1:N      │    └──────────────┘  │    │ status       │                     │
-│         ▼          │                      │    │ created_at   │                     │
-│  ┌──────────────┐  │                      │    └──────────────┘                     │
+│  │ summary      │  │    │ connection_id│  │    │ thread_id    │                     │
+│  │ embedding_id │  │    │ ip_address   │  │    │ thread_title │                     │
+│  │ row_count    │  │    │ user_agent   │  │    │ prompt       │                     │
+│  │ indexed      │  │    │ duration_ms  │  │    │ answer       │                     │
+│  └──────┬───────┘  │    │ status       │  │    │ sql_generated│                     │
+│         │          │    │ created_at   │  │    │ columns_json │                     │
+│         │ 1:N      │    └──────────────┘  │    │ rows_json    │                     │
+│         ▼          │                      │    │ execution_ms │                     │
+│  ┌──────────────┐  │                      │    │ status       │                     │
+│  │   columns    │  │                      │    │ created_at   │                     │
+│  │──────────────│  │                      │    └──────────────┘                     │
 │  │   columns    │  │    ┌──────────────┐  │                                         │
 │  │──────────────│  │    │   queries    │  │    ┌──────────────────────┐              │
 │  │ id (PK)      │  │    │──────────────│  │    │data_embedding_       │              │
@@ -150,7 +154,7 @@ Business teams drown in data they **can't access**. Every "quick question" — *
 - `connections` → `foreign_keys` (FK map per connection)
 - `users` ↔ `connections` via `user_permissions` (N:M permission matrix)
 - `users` → `dashboards` → `dashboard_pins` (personal dashboard ownership)
-- `users` → `chat_history` (per-user, per-connection conversation persistence)
+- `users` → `chat_history` (per-user, per-connection conversation persistence, organized by `thread_id`)
 - `users` → `activity_logs` (audit trail per user)
 - `connections` → `queries` (every generated SQL is logged)
 - `connections` → `data_embedding_refresh_log` (tracks when each column's data samples were last embedded)
@@ -229,7 +233,7 @@ Users are stored with bcrypt-hashed passwords. Permissions use an **N:M matrix**
 
 **Activity Domain** — `activity_logs`, `queries`, `chat_history`
 
-Every significant action flows through the activity logging pipeline. When a user logs in, it's logged. When a query is generated, both the `queries` table (for SQL analytics) and `activity_logs` (for audit trail) receive records. Chat history stores the first 50 rows of every result set, allowing users to scroll back through previous conversations without re-executing SQL.
+Every significant action flows through the activity logging pipeline. When a user logs in, it's logged. When a query is generated, both the `queries` table (for SQL analytics) and `activity_logs` (for audit trail) receive records. Chat history stores the first 50 rows of every result set, allowing users to scroll back through previous conversations without re-executing SQL. Messages are organized into **threads** — each thread has a UUID `thread_id` and an auto-generated `thread_title` (produced by the LLM from the first message). Users can switch between threads, rename them, or delete them.
 
 **Dashboard Domain** — `dashboards`, `dashboard_pins`
 
@@ -356,6 +360,32 @@ From any chat response (or replayed history item) that includes SQL, the fronten
 - How each key output column is computed
 
 The explanation is rendered in a modal so users can quickly validate query intent, making it safe for non-SQL users to understand and discuss generated SQL with data teams.
+
+### Thread-Based Conversations
+
+Every message in DbChat belongs to a **thread**. Threads provide conversational context — when a user follows up with *"Now break that down by month"*, the LLM receives the last 10 messages from the current thread as context, so it knows what "that" refers to.
+
+**Thread lifecycle:**
+1. **Auto-creation**: The first message in a new conversation generates a UUID `thread_id`. The LLM simultaneously generates a short, descriptive title from the prompt (e.g., *"Top customers by spending"*) and stores it in `thread_title`.
+2. **Sidebar navigation**: The frontend displays all threads in a collapsible sidebar, sorted by most recent. Clicking a thread loads its full message history.
+3. **Title management**: Users can rename thread titles or let the auto-generated title stand.
+4. **Thread deletion**: Deleting a thread removes all associated `chat_history` rows for that user/connection.
+5. **Context injection**: When generating SQL, the last 10 messages from the active thread are injected into the LLM prompt as conversation history, enabling multi-turn reasoning.
+
+**API endpoints**: `GET /api/chat/threads?connection_id=X` (list), `PUT /api/chat/threads/{thread_id}/title` (rename), `DELETE /api/chat/threads/{thread_id}` (delete).
+
+### Smart Onboarding (Dynamic Welcome)
+
+When a user selects a database connection, DbChat generates a **personalized welcome** instead of showing generic placeholder text.
+
+**How it works:**
+1. The frontend calls `GET /api/chat/welcome?connection_id=X`
+2. The backend fetches all table summaries from PostgreSQL for that connection
+3. The table summaries are sent to the LLM with a prompt requesting: a 2–3 sentence database overview and 7 diverse starter queries covering different tables, aggregation types, and complexity levels
+4. The LLM returns a JSON response with `summary` (plain-English database description) and `suggestions` (array of 7 query strings)
+5. The frontend renders the summary as a welcome message and the suggestions as clickable chips — clicking one auto-fills the chat input
+
+**Why it matters:** New users connecting to an unfamiliar database no longer see a blank chat. They immediately understand what the database contains and have ready-made queries to explore.
 
 ## Flow 4: Dashboard Pin & Refresh
 
