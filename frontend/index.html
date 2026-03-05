@@ -244,11 +244,11 @@
             <div id="messages" class="max-w-5xl mx-auto space-y-5">
                 <div class="msg-in flex gap-3">
                     <div class="w-8 h-8 rounded-lg bg-d-accent flex items-center justify-center text-white text-xs font-bold shrink-0 mt-1">DB</div>
-                    <div class="bot-msg"><p class="text-sm">👋 Hi! I'm <strong>DbChat</strong> — ask me anything about your data in plain English.</p>
-                        <div class="flex flex-wrap gap-2 mt-3">
-                            <button onclick="askChip(this)" class="chip">Show total revenue by country</button>
-                            <button onclick="askChip(this)" class="chip">Top 10 customers by spending</button>
-                            <button onclick="askChip(this)" class="chip">Monthly revenue trend</button>
+                    <div class="bot-msg" id="welcomeMsg"><p class="text-sm">👋 Hi! I'm <strong>DbChat</strong> — loading your database overview…</p>
+                        <div class="flex items-center gap-2 mt-3">
+                            <div class="typing-dot w-2 h-2 bg-d-muted rounded-full"></div>
+                            <div class="typing-dot w-2 h-2 bg-d-muted rounded-full"></div>
+                            <div class="typing-dot w-2 h-2 bg-d-muted rounded-full"></div>
                         </div>
                     </div>
                 </div>

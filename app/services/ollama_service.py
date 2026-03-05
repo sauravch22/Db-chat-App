@@ -456,6 +456,76 @@ Explain this query in plain English:"""
             logger.error(f"Error classifying intent: {str(e)}")
             return "data"
     
+    async def generate_welcome(self, table_summaries: list) -> dict:
+        """Generate a friendly database overview and 7 suggested queries.
+        
+        Args:
+            table_summaries: [{"name": "...", "summary": "...", "row_count": N}, ...]
+        Returns:
+            {"summary": "...", "suggestions": ["...", ...]}
+        """
+        tables_text = "\n".join(
+            f"- {t['name']} ({t.get('row_count', '?')} rows): {t.get('summary', 'no description')}"
+            for t in table_summaries
+        )
+
+        system = """You are a friendly database assistant. The user just connected to a database.
+Generate a SHORT, welcoming overview and suggest interesting queries they can try.
+
+Rules:
+1. Output ONLY valid JSON — no markdown fences, no commentary
+2. The "summary" field: 2-3 sentences describing what this database contains (mention key tables and their relationships). Be specific about the data domain.
+3. The "suggestions" field: exactly 7 natural-language questions a user might ask. Make them diverse:
+   - 2 simple counts or listings
+   - 2 aggregations (totals, averages, top-N)
+   - 2 filtered or comparative queries
+   - 1 time-based or trend query
+4. Keep each suggestion under 60 characters
+5. Use actual table/column names from the schema when relevant"""
+
+        prompt = f"""Database tables:
+{tables_text}
+
+Return JSON:
+{{"summary": "...", "suggestions": ["...", ...]}}"""
+
+        raw = ""
+        try:
+            raw = await self._call_chat_completions(system, prompt, temperature=0.3, max_tokens=600)
+            logger.info(f"Welcome raw LLM response (first 500 chars): {raw[:500]}")
+            # Strip <think>...</think> blocks (Qwen3 reasoning)
+            import re as _re
+            raw = _re.sub(r'<think>.*?</think>', '', raw, flags=_re.DOTALL)
+            # Strip markdown fences if present
+            raw = raw.strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[-1]
+            if raw.endswith("```"):
+                raw = raw.rsplit("```", 1)[0]
+            raw = raw.strip()
+            # Extract JSON object from the response
+            import json as _json
+            json_match = _re.search(r'\{.*\}', raw, _re.DOTALL)
+            if json_match:
+                raw = json_match.group(0)
+            data = _json.loads(raw)
+            summary = data.get("summary", "")
+            suggestions = data.get("suggestions", [])
+            if not isinstance(suggestions, list):
+                suggestions = []
+            # Ensure exactly 7 (trim or pad)
+            suggestions = [s for s in suggestions if isinstance(s, str)][:7]
+            return {"summary": summary, "suggestions": suggestions}
+        except Exception as e:
+            logger.error(f"Error generating welcome: {e}")
+            logger.error(f"Raw LLM response (first 800 chars): {raw[:800]}")
+            return {
+                "summary": f"This database has {len(table_summaries)} tables ready to explore.",
+                "suggestions": [
+                    f"How many rows are in {table_summaries[0]['name']}?" if table_summaries else "Show all tables"
+                ]
+            }
+
     async def health_check(self) -> bool:
         """Check if remote LLM API and local Ollama (embeddings) are reachable"""
         

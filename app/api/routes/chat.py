@@ -530,3 +530,68 @@ async def delete_thread(
         return {"deleted": deleted}
     finally:
         db.close()
+
+
+# ══════════════════════════════════════════════════════
+#  WELCOME – DB summary + suggested queries
+# ══════════════════════════════════════════════════════
+
+class WelcomeResponse(BaseModel):
+    summary: str
+    suggestions: List[str]
+    table_count: int
+
+
+@router.get("/welcome", response_model=WelcomeResponse)
+async def welcome(
+    connection_id: int = QParam(..., description="Database connection ID"),
+    user: dict = Depends(get_current_user),
+):
+    """Generate a friendly database overview and suggested queries for the welcome screen."""
+    from app.services.ollama_service import OllamaService
+    from app.services.metadata_service import MetadataService
+    from app.models import Table, Database
+
+    db = SessionLocal()
+    try:
+        metadata = MetadataService()
+        try:
+            # Get table summaries with row counts
+            table_rows = (
+                db.query(Table)
+                .filter(
+                    Table.database_id.in_(
+                        db.query(Database.id).filter(
+                            Database.connection_id == connection_id
+                        )
+                    )
+                )
+                .all()
+            )
+            table_summaries = []
+            for t in table_rows:
+                summary = t.summary or t.context or t.name
+                table_summaries.append({
+                    "name": t.name,
+                    "summary": summary[:200],
+                    "row_count": t.sample_count or 0,
+                })
+
+            if not table_summaries:
+                return WelcomeResponse(
+                    summary="No tables found. Please index this database first.",
+                    suggestions=[],
+                    table_count=0,
+                )
+
+            ollama = OllamaService()
+            result = await ollama.generate_welcome(table_summaries)
+            return WelcomeResponse(
+                summary=result["summary"],
+                suggestions=result["suggestions"],
+                table_count=len(table_summaries),
+            )
+        finally:
+            metadata.close()
+    finally:
+        db.close()

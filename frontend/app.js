@@ -246,10 +246,11 @@ async function loadDatabases() {
             o.value = db.id; o.textContent = db.name; sel.appendChild(o);
         });
         selectedConnId = sorted[0].id;
-        sel.onchange = () => { selectedConnId = +sel.value; startNewThread(); loadThreads(); };
+        sel.onchange = () => { selectedConnId = +sel.value; startNewThread(); loadThreads(); loadWelcome(); };
 
-        // Load threads for initial DB
+        // Load threads + welcome for initial DB
         await loadThreads();
+        loadWelcome();
     } catch(e) {
         if (e.message && e.message.includes('Session expired')) return;
         sel.innerHTML = '<option value="">No databases</option>';
@@ -324,11 +325,11 @@ function clearChat() {
     el.innerHTML = `
         <div class="msg-in flex gap-3">
             <div class="w-8 h-8 rounded-lg bg-d-accent flex items-center justify-center text-white text-xs font-bold shrink-0 mt-1">DB</div>
-            <div class="bot-msg"><p class="text-sm">👋 Hi! I'm <strong>DbChat</strong> — ask me anything about your data in plain English.</p>
-                <div class="flex flex-wrap gap-2 mt-3">
-                    <button onclick="askChip(this)" class="chip">Show total revenue by country</button>
-                    <button onclick="askChip(this)" class="chip">Top 10 customers by spending</button>
-                    <button onclick="askChip(this)" class="chip">Monthly revenue trend</button>
+            <div class="bot-msg" id="welcomeMsg"><p class="text-sm">👋 Hi! I'm <strong>DbChat</strong> — loading your database overview…</p>
+                <div class="flex items-center gap-2 mt-3">
+                    <div class="typing-dot w-2 h-2 bg-d-muted rounded-full"></div>
+                    <div class="typing-dot w-2 h-2 bg-d-muted rounded-full"></div>
+                    <div class="typing-dot w-2 h-2 bg-d-muted rounded-full"></div>
                 </div>
             </div>
         </div>`;
@@ -336,6 +337,62 @@ function clearChat() {
     lastResponseCols = [];
     chartIdx = 0;
     // Do NOT reset currentThreadId here — that's managed by startNewThread/selectThread
+}
+
+// ─── Dynamic welcome: DB summary + LLM-generated suggestions ──
+let welcomeCache = {};  // { connId: { summary, suggestions, table_count } }
+
+async function loadWelcome() {
+    if (!selectedConnId) return;
+    const connId = selectedConnId;
+
+    // Use cache if available
+    if (welcomeCache[connId]) {
+        renderWelcome(welcomeCache[connId]);
+        return;
+    }
+
+    try {
+        const r = await authFetch(`${chatUrl()}/api/chat/welcome?connection_id=${connId}`);
+        if (!r.ok) { renderWelcomeFallback(); return; }
+        const data = await r.json();
+        welcomeCache[connId] = data;
+        // Only render if user is still on the same DB and hasn't navigated away
+        if (selectedConnId === connId && !currentThreadId) {
+            renderWelcome(data);
+        }
+    } catch (e) {
+        logger_warn('loadWelcome failed', e);
+        renderWelcomeFallback();
+    }
+}
+
+function renderWelcome(data) {
+    const el = document.getElementById('welcomeMsg');
+    if (!el) return;
+    const chips = (data.suggestions || []).map(s =>
+        `<button onclick="askChip(this)" class="chip">${esc(s)}</button>`
+    ).join('');
+    el.innerHTML = `
+        <p class="text-sm">👋 Hi! I'm <strong>DbChat</strong> — ask me anything about your data in plain English.</p>
+        <div class="mt-3 p-3 rounded-lg" style="background:#171a23;border:1px solid #252938">
+            <p class="text-xs font-semibold text-d-accent mb-1">📊 Database Overview · ${data.table_count || '?'} tables</p>
+            <p class="text-[13px] text-d-text leading-relaxed">${esc(data.summary || '')}</p>
+        </div>
+        <p class="text-xs text-d-muted mt-4 mb-2">💡 Try asking:</p>
+        <div class="flex flex-wrap gap-2">${chips}</div>`;
+}
+
+function renderWelcomeFallback() {
+    const el = document.getElementById('welcomeMsg');
+    if (!el) return;
+    el.innerHTML = `
+        <p class="text-sm">👋 Hi! I'm <strong>DbChat</strong> — ask me anything about your data in plain English.</p>
+        <div class="flex flex-wrap gap-2 mt-3">
+            <button onclick="askChip(this)" class="chip">Show total revenue by country</button>
+            <button onclick="askChip(this)" class="chip">Top 10 customers by spending</button>
+            <button onclick="askChip(this)" class="chip">Monthly revenue trend</button>
+        </div>`;
 }
 
 // ─── Load persisted chat history for current thread ──
@@ -415,6 +472,7 @@ function startNewThread() {
     currentThreadId = null;
     clearChat();
     highlightActiveThread();
+    loadWelcome();
     document.getElementById('queryInput')?.focus();
 }
 
