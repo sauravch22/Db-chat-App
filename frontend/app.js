@@ -1,8 +1,3 @@
-// ══════════════════════════════════════════════════════
-//  DbChat – Frontend App  (v12.1 — Pin Data Feature)
-// ══════════════════════════════════════════════════════
-
-let selectedConnId = null;
 let isProcessing = false;
 let chartIdx = 0;
 
@@ -40,6 +35,10 @@ async function doLogin() {
     const passEl = document.getElementById('loginPass');
     const errEl  = document.getElementById('loginError');
     const btn    = document.getElementById('loginBtn');
+    if (!userEl || !passEl || !errEl || !btn) {
+        try { console.error('Login form elements missing; cannot submit login'); } catch(_) {}
+        return;
+    }
     const u = userEl.value.trim(), p = passEl.value;
     errEl.textContent = '';
     if (!u || !p) { errEl.textContent = 'Please enter username and password'; return; }
@@ -153,10 +152,13 @@ function showApp() {
     renderUserBadge();
     loadDatabases();
 
-    // Tab bar always visible; admin button only for admins
+    // Tab bar always visible; admin/reindex button only for privileged users
     document.getElementById('tabBar').style.display = '';
     const isAnyAdmin = _isAnyAdmin();
-    document.getElementById('tabAdmin').style.display = isAnyAdmin ? '' : 'none';
+    const canOnboard = Object.entries(_perms()).some(([, v]) => v.includes('db_onboard'));
+    const adminBtn = document.getElementById('tabAdmin');
+    adminBtn.style.display = isAnyAdmin ? '' : 'none';
+    adminBtn.textContent = canOnboard ? '👥 Admin' : '🔄 Reindex';
     // Activity tab button label: admins see "Activity", regular users see "My Activity"
     const actBtn = document.getElementById('tabActivity');
     actBtn.textContent = isAnyAdmin ? '📋 Activity' : '📋 My Activity';
@@ -168,7 +170,7 @@ function _perms() { return (currentUser && currentUser.perms) || {}; }
 function _isGlobalAdmin() { return (_perms()["*"] || []).includes("db_onboard"); }
 function _isAnyAdmin() {
     const p = _perms();
-    return Object.entries(p).some(([, v]) => v.includes("db_onboard"));
+    return Object.entries(p).some(([, v]) => v.includes("db_onboard") || v.includes("db_reindex"));
 }
 
 function renderUserBadge() {
@@ -413,16 +415,25 @@ async function addBotReply(query, data) {
     if (data.execution_time_ms) st.push(`${(data.execution_time_ms/1000).toFixed(1)}s`);
     if (st.length) h += `<div class="flex flex-wrap gap-3 text-xs text-d-muted">${st.join(' · ')}</div>`;
 
+    let exploreBtnId = null;
     let pinDataBtnId = null;
+    let explainBtnId = null;
     if (data.rows?.length && data.columns?.length) {
         h += buildTable(data.columns, data.rows, 30, data.row_count);
         h += `<div class="flex flex-wrap gap-2 mt-1">`;
-        h += `<button onclick="openDetailModal()" class="chip">🔍 Explore full data (${Math.min(data.row_count||data.rows.length, 100)} rows)</button>`;
+        exploreBtnId = 'explore-' + Date.now();
+        h += `<button id="${exploreBtnId}" class="chip">🔍 Explore full data (${Math.min(data.row_count||data.rows.length, 100)} rows)</button>`;
         if (data.sql) {
             pinDataBtnId = 'pin-data-' + Date.now();
             h += `<button id="${pinDataBtnId}" class="chip" style="color:#fbbf24;border-color:rgba(251,191,36,.3)">📌 Pin Data</button>`;
+            explainBtnId = 'explain-' + Date.now();
+            h += `<button id="${explainBtnId}" class="chip" style="color:#a78bfa;border-color:rgba(167,139,250,.3)">🧠 Explain</button>`;
         }
         h += `</div>`;
+    } else if (data.sql) {
+        // No rows but we have SQL (e.g. catalog query) — still show explain
+        explainBtnId = 'explain-' + Date.now();
+        h += `<div class="flex flex-wrap gap-2 mt-1"><button id="${explainBtnId}" class="chip" style="color:#a78bfa;border-color:rgba(167,139,250,.3)">🧠 Explain</button></div>`;
     }
 
     const chartAreaId = 'crec-' + Date.now();
@@ -445,11 +456,52 @@ async function addBotReply(query, data) {
     document.getElementById('messages').appendChild(wrap);
     scrollEnd();
 
+    // Attach Explore full data handler so each message uses its own rows/columns
+    if (exploreBtnId) {
+        const exploreBtn = document.getElementById(exploreBtnId);
+        if (exploreBtn) {
+            exploreBtn.onclick = () => openDetailModal(data.columns, data.rows);
+        }
+    }
+
     // Attach pin-data button handler (uses closure for query/sql)
     if (pinDataBtnId) {
         const pinDataBtn = document.getElementById(pinDataBtnId);
         if (pinDataBtn) {
             pinDataBtn.onclick = () => openPinModal(query, data.sql, 'table', null, (query || '').substring(0, 60));
+        }
+    }
+
+    // Attach explain button handler
+    if (explainBtnId) {
+        const explainBtn = document.getElementById(explainBtnId);
+        if (explainBtn) {
+            explainBtn.onclick = async () => {
+                explainBtn.disabled = true;
+                explainBtn.textContent = '🧠 Thinking…';
+                try {
+                    const r = await authFetch(`${chatUrl()}/api/chat/explain`, {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            connection_id: selectedConnId,
+                            sql: data.sql,
+                            prompt: query,
+                            schema_context: data.schema_context || null,
+                            columns: data.columns || null,
+                            row_count: data.row_count || null
+                        })
+                    });
+                    const result = await r.json();
+                    if (!r.ok) throw new Error(result.detail || 'Explain failed');
+                    openExplainModal(result.explanation, data.sql, query);
+                } catch (err) {
+                    console.error('Explain error:', err);
+                    alert('Failed to generate explanation: ' + err.message);
+                } finally {
+                    explainBtn.disabled = false;
+                    explainBtn.textContent = '🧠 Explain';
+                }
+            };
         }
     }
 
@@ -634,7 +686,7 @@ function renderChart(canvas, type, cfg) {
                         return chart.data.labels.map((l,i) => {
                             const v = ds.data[i]; const pct = total > 0 ? ((v/total)*100).toFixed(1) : 0;
                             return { text: `${l}  —  ${Number(v).toLocaleString()} (${pct}%)`, fillStyle: ds.backgroundColor[i],
-                                strokeStyle:'transparent', hidden: false, index: i };
+                                fontColor: '#8b8fa3', strokeStyle:'transparent', hidden: false, index: i };
                         });
                     }
                 }},
@@ -687,6 +739,32 @@ function openDetailModal(cols, rows) {
 
 function closeDetailModal() {
     document.getElementById('detailModal').classList.remove('open');
+}
+
+// ─── Explain Modal ───────────────────────────────────
+function openExplainModal(explanation, sql, prompt) {
+    const body = document.getElementById('explainBody');
+    // Convert markdown-like formatting to HTML
+    let html = explanation
+        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+        .replace(/^- /gm, '• ')
+        .replace(/\n/g, '<br>');
+    body.innerHTML = `
+        <div style="margin-bottom:12px;color:#94a3b8;font-size:13px">
+            <em>Question: "${esc(prompt)}"</em>
+        </div>
+        <div style="line-height:1.7;color:#e2e8f0;font-size:14px">${html}</div>
+        <details style="margin-top:16px">
+            <summary style="cursor:pointer;color:#64748b;font-size:12px">View SQL</summary>
+            <pre style="background:#0f172a;padding:12px;border-radius:8px;
+                        margin-top:8px;font-size:12px;color:#7c6eff;
+                        overflow-x:auto">${esc(sql)}</pre>
+        </details>`;
+    document.getElementById('explainModal').classList.add('open');
+}
+
+function closeExplainModal() {
+    document.getElementById('explainModal').classList.remove('open');
 }
 
 // Open the detail explorer for a dashboard pin
@@ -801,7 +879,14 @@ function switchTab(tab) {
     if (tab === 'admin') {
         adminTab.style.display = '';
         btnAdmin.classList.add('active');
+        // Show onboard + user management only for db_onboard admins
+        const canOnboard = Object.entries(_perms()).some(([, v]) => v.includes('db_onboard'));
+        const onboardSec = document.getElementById('adminOnboardSection');
+        const userMgmtSec = document.getElementById('adminUserMgmtSection');
+        if (onboardSec) onboardSec.style.display = canOnboard ? '' : 'none';
+        if (userMgmtSec) userMgmtSec.style.display = canOnboard ? '' : 'none';
         populateAdminDbSelector();
+        populateReindexDbSelector();
     } else if (tab === 'activity') {
         activityTab.style.display = '';
         btnActivity.classList.add('active');
@@ -817,10 +902,130 @@ function switchTab(tab) {
 }
 
 // ═════════════════════════════════════════════════════
-//  ADMIN – PER-DB USER MANAGEMENT
+//  ADMIN – DB ONBOARDING + PER-DB USER MANAGEMENT
 // ═════════════════════════════════════════════════════
 let adminUsers = [];
 let adminSelectedDb = null;
+
+async function submitRegisterDb() {
+    const nameEl = document.getElementById('adminRegName');
+    const hostEl = document.getElementById('adminRegHost');
+    const portEl = document.getElementById('adminRegPort');
+    const userEl = document.getElementById('adminRegUser');
+    const passEl = document.getElementById('adminRegPass');
+    const dbEl   = document.getElementById('adminRegDb');
+    const typeEl = document.getElementById('adminRegType');
+    const statusEl = document.getElementById('adminOnboardStatus');
+    const btn = document.getElementById('adminOnboardBtn');
+
+    if (!nameEl || !hostEl || !portEl || !userEl || !passEl || !dbEl || !typeEl || !statusEl || !btn) return;
+
+    const name = nameEl.value.trim();
+    const host = hostEl.value.trim();
+    const port = parseInt(portEl.value.trim() || '0', 10);
+    const username = userEl.value.trim();
+    const password = passEl.value;
+    const database = dbEl.value.trim();
+    const database_type = typeEl.value || 'postgres';
+
+    statusEl.className = 'text-xs text-d-muted';
+    statusEl.textContent = '';
+
+    if (!name || !host || !port || !username || !password || !database) {
+        statusEl.className = 'text-xs text-red-400';
+        statusEl.textContent = 'Please fill in all fields (name, host, port, username, password, database).';
+        return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = 'Registering…';
+    statusEl.textContent = 'Registering database…';
+
+    try {
+        const r = await authFetch(`${chatUrl()}/api/admin/register-db`, {
+            method: 'POST',
+            body: JSON.stringify({ name, host, port, username, password, database, database_type })
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+            const msg = data.detail || 'Failed to register database';
+            throw new Error(msg);
+        }
+        statusEl.className = 'text-xs text-d-green';
+        statusEl.textContent = `Registered "${data.name}" (id ${data.id}). Indexing scheduled in background.`;
+
+        // Optionally clear sensitive fields
+        passEl.value = '';
+
+        // Refresh DB selectors so the new connection is immediately usable
+        try { await loadDatabases(); } catch(_) {}
+        try { populateAdminDbSelector(); } catch(_) {}
+        try { populateReindexDbSelector(); } catch(_) {}
+    } catch (e) {
+        statusEl.className = 'text-xs text-red-400';
+        statusEl.textContent = e.message || 'Failed to register database';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '➕ Register Database';
+    }
+}
+
+function populateReindexDbSelector() {
+    const sel = document.getElementById('reindexDbSelector');
+    if (!sel) return;
+    sel.innerHTML = '<option value="">Select a database…</option>';
+    const perms = _perms();
+    const isGlobal = _isGlobalAdmin();
+    const chatSel = document.getElementById('dbSelector');
+    for (let i = 0; i < chatSel.options.length; i++) {
+        const connId = chatSel.options[i].value;
+        if (!connId) continue;
+        const dbPerms = perms[connId] || [];
+        if (isGlobal || dbPerms.includes('db_reindex') || dbPerms.includes('db_onboard')) {
+            const o = document.createElement('option');
+            o.value = connId;
+            o.textContent = chatSel.options[i].textContent;
+            sel.appendChild(o);
+        }
+    }
+}
+
+async function triggerReindex() {
+    const sel = document.getElementById('reindexDbSelector');
+    const statusEl = document.getElementById('reindexStatus');
+    const btn = document.getElementById('reindexBtn');
+    if (!sel || !statusEl || !btn) return;
+
+    const connId = sel.value;
+    if (!connId) {
+        statusEl.className = 'text-xs text-red-400';
+        statusEl.textContent = 'Please select a database first.';
+        return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = 'Reindexing…';
+    statusEl.className = 'text-xs text-d-muted';
+    statusEl.textContent = 'Triggering reindex…';
+
+    try {
+        const r = await authFetch(`${chatUrl()}/api/admin/reindex/${connId}`, {
+            method: 'POST'
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+            throw new Error(data.detail || 'Failed to trigger reindex');
+        }
+        statusEl.className = 'text-xs text-d-green';
+        statusEl.textContent = `Reindexing started for connection ${connId}. Estimated ~${data.estimated_duration_seconds || 30}s.`;
+    } catch (e) {
+        statusEl.className = 'text-xs text-red-400';
+        statusEl.textContent = e.message || 'Failed to trigger reindex';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '🔄 Reindex';
+    }
+}
 
 function populateAdminDbSelector() {
     const sel = document.getElementById('adminDbSelector');
@@ -1346,7 +1551,7 @@ async function loadUserModalStats() {
 
 // ESC key closes modals
 document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') { closeChartModal(); closeDetailModal(); closeUserActivityModal(); closePinModal(); closeCreateDashboardModal(); }
+    if (e.key === 'Escape') { closeChartModal(); closeDetailModal(); closeUserActivityModal(); closePinModal(); closeCreateDashboardModal(); closeExplainModal(); }
 });
 
 // ═════════════════════════════════════════════════════

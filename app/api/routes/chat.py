@@ -2,6 +2,8 @@
 
 import json
 import time
+from decimal import Decimal
+from datetime import datetime, date
 from fastapi import APIRouter, HTTPException, Depends, Request, Query as QParam
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
@@ -20,6 +22,17 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
 MAX_HISTORY_ROWS = 50  # max result rows persisted per message
 
 
+def _safe_json(obj):
+    """JSON encoder that handles Decimal, datetime, date, bytes, etc."""
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, bytes):
+        return obj.decode("utf-8", errors="replace")
+    return str(obj)
+
+
 # ── Helper: persist a chat exchange to chat_history ───
 def _save_chat_history(user: dict, connection_id: int, prompt: str, result: dict):
     """Fire-and-forget save of a chat exchange (never raises)."""
@@ -36,11 +49,11 @@ def _save_chat_history(user: dict, connection_id: int, prompt: str, result: dict
                 prompt=prompt,
                 answer=result.get("answer"),
                 sql=result.get("sql"),
-                columns=json.dumps(cols) if cols else None,
-                rows=json.dumps(rows[:MAX_HISTORY_ROWS]) if rows else None,
+                columns=json.dumps(cols, default=_safe_json) if cols else None,
+                rows=json.dumps(rows[:MAX_HISTORY_ROWS], default=_safe_json) if rows else None,
                 row_count=result.get("row_count"),
                 execution_time_ms=result.get("execution_time_ms"),
-                selected_tables=json.dumps(sel_tables) if sel_tables else None,
+                selected_tables=json.dumps(sel_tables, default=_safe_json) if sel_tables else None,
                 status=result.get("status", "error"),
                 error_message=result.get("error"),
             )
@@ -288,3 +301,66 @@ async def execute_query(
             success=False,
             error=str(e)
         )
+
+
+# ══════════════════════════════════════════════════════
+#  POST /api/chat/explain  –  Explain a SQL query
+# ══════════════════════════════════════════════════════
+
+class ExplainRequest(BaseModel):
+    connection_id: int
+    sql: str
+    prompt: str
+    schema_context: Optional[str] = None
+    columns: Optional[List[str]] = None
+    row_count: Optional[int] = None
+
+
+class ExplainResponse(BaseModel):
+    explanation: str
+    execution_time_ms: int
+
+
+@router.post("/explain", response_model=ExplainResponse)
+async def explain_query(
+    request: ExplainRequest,
+    req: Request,
+    user: dict = Depends(get_current_user),
+):
+    """Explain a SQL query in plain English for non-technical users."""
+    if not has_db_permission(user, request.connection_id, "prompt_query"):
+        raise HTTPException(status_code=403, detail="Permission 'prompt_query' required on this database")
+
+    t0 = time.time()
+    try:
+        chat_service = ChatService()
+        try:
+            schema_context = request.schema_context
+            if not schema_context:
+                tables = chat_service._extract_tables_from_sql(request.sql)
+                schema_context = chat_service.metadata.get_column_schema(
+                    request.connection_id, tables
+                ) or "Schema not available"
+
+            explanation = await chat_service.ollama.explain_sql(
+                sql=request.sql,
+                user_prompt=request.prompt,
+                schema_context=schema_context,
+                columns=request.columns,
+                row_count=request.row_count,
+            )
+            dur = int((time.time() - t0) * 1000)
+            await log_activity(
+                req, user=user, action="chat.explain",
+                connection_id=request.connection_id,
+                detail={"sql": request.sql[:300], "prompt": request.prompt[:200]},
+                duration_ms=dur,
+            )
+            return ExplainResponse(explanation=explanation, execution_time_ms=dur)
+        finally:
+            chat_service.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Explain endpoint error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))

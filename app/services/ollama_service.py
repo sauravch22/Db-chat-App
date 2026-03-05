@@ -234,6 +234,49 @@ SQL query:"""
             # Fallback to direct generation
             return "", await self.generate_sql(user_prompt, schema_context, sample_info)
 
+    async def explain_sql(
+        self,
+        sql: str,
+        user_prompt: str,
+        schema_context: str,
+        columns: list = None,
+        row_count: int = None
+    ) -> str:
+        """Generate a plain-English explanation of a SQL query for non-technical users."""
+        system = """You are a SQL teacher explaining a query to a business user
+who does NOT know SQL. Break down the query into sections:
+
+1. **What this query does** — one-sentence summary
+2. **Tables used** — list each table and what data it holds
+3. **How tables connect** — explain each JOIN in plain English
+4. **Filters applied** — explain WHERE conditions in plain English
+5. **Calculations** — explain any SUM, COUNT, AVG, GROUP BY
+6. **Sorting & Limits** — explain ORDER BY and LIMIT if present
+
+Use bullet points. No SQL syntax in your explanation — only plain English.
+Keep it concise — max 200 words."""
+
+        prompt = f"""User's original question: {user_prompt}
+
+SQL query that was generated:
+{sql}
+
+Database schema used:
+{schema_context}
+
+{f"Result: {row_count} rows returned with columns: {', '.join(columns)}" if columns else ""}
+
+Explain this query in plain English:"""
+
+        try:
+            explanation = await self._call_chat_completions(
+                system, prompt, temperature=0.3, max_tokens=512
+            )
+            return explanation
+        except Exception as e:
+            logger.error(f"Error explaining SQL: {str(e)}")
+            return "Unable to generate explanation at this time."
+
     async def identify_tables(self, user_prompt: str, table_summaries: list) -> list:
         """Identify relevant tables from provided summaries. Returns list of exact table names."""
         if not table_summaries:

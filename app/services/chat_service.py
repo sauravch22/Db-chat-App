@@ -985,6 +985,14 @@ class ChatService:
                 "execution_time_ms": int((time.time() - start_time) * 1000)
             }
 
+    def _extract_tables_from_sql(self, sql: str) -> list:
+        """Extract table names from a SQL query (best effort)."""
+        tables = set()
+        pattern = r'(?:FROM|JOIN)\s+"?(\w+)"?'
+        for match in re.finditer(pattern, sql, re.IGNORECASE):
+            tables.add(match.group(1))
+        return list(tables)
+
     def close(self):
         if self.db:
             self.db.close()
