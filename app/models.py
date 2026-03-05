@@ -271,6 +271,8 @@ class ChatHistory(Base):
     selected_tables = SA_Column(Text, nullable=True)    # JSON array of table names
     status = SA_Column(String(20), nullable=False, default="success")  # success | error
     error_message = SA_Column(Text, nullable=True)
+    thread_id = SA_Column(String(36), nullable=True, index=True)    # groups messages into a thread
+    thread_title = SA_Column(String(255), nullable=True)             # auto-generated from first prompt
     created_at = SA_Column(DateTime, default=datetime.utcnow, index=True)
 
     user = relationship("User", foreign_keys=[user_id])

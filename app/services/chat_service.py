@@ -32,7 +32,8 @@ class ChatService:
         connection_id: int,
         user_prompt: str,
         top_k_tables: int = 5,
-        timeout: int = 30
+        timeout: int = 30,
+        thread_history: list = None
     ) -> Dict[str, Any]:
         start_time = time.time()
         try:
@@ -192,7 +193,16 @@ class ChatService:
             logger.info(f"USE_REASONING_MODE: {use_reasoning}")
             
             reasoning = ""
-            if use_reasoning:
+            if thread_history:
+                # Thread context replaces reasoning — prior queries provide context
+                logger.info(f"Thread-aware SQL generation: {len(thread_history)} prior exchanges")
+                sql = await self.ollama.generate_sql(
+                    user_prompt=user_prompt,
+                    schema_context=schema_context,
+                    sample_info=sample_info,
+                    thread_history=thread_history
+                )
+            elif use_reasoning:
                 logger.info("Using two-step reasoning mode")
                 reasoning, sql = await self.ollama.generate_sql_with_reasoning(
                     user_prompt=user_prompt,

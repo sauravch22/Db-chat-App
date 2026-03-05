@@ -81,13 +81,43 @@ class OllamaService:
         logger.debug(f"LLM tokens: prompt={usage.get('prompt_tokens','?')}, completion={usage.get('completion_tokens','?')}")
         return content
 
+    async def _call_chat_with_messages(self, messages: list, temperature: float = 0.0, max_tokens: int = None) -> str:
+        """Call the remote OpenAI-compatible chat completions API with a full messages array (for thread context)."""
+        payload = {
+            "model": self.llm_model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens or self.llm_max_tokens,
+        }
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                self.llm_api_url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=self.llm_timeout,
+            )
+        if response.status_code != 200:
+            logger.error(f"LLM API error (status {response.status_code}): {response.text[:300]}")
+            raise Exception(f"LLM API returned status code {response.status_code}")
+        data = response.json()
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        usage = data.get("usage", {})
+        logger.debug(f"LLM tokens (thread): prompt={usage.get('prompt_tokens','?')}, completion={usage.get('completion_tokens','?')}")
+        return content
+
     async def generate_sql(
         self,
         user_prompt: str,
         schema_context: str,
-        sample_info: str
+        sample_info: str,
+        thread_history: list = None
     ) -> str:
-        """Generate SQL query from natural language"""
+        """Generate SQL query from natural language.
+        
+        Args:
+            thread_history: Optional list of prior thread exchanges:
+                           [{"prompt": "...", "sql": "..."}, ...]
+        """
         
         # Extract exact table names from the schema context to enforce as hard constraints
         exact_tables = []
@@ -115,7 +145,8 @@ STRICT RULES:
 11. Do not wrap the query in markdown code fences
 12. If you JOIN a subquery, the join key columns MUST be included in that subquery SELECT list
 13. Never reference columns from a subquery alias unless that column is explicitly selected by it
-14. For comparisons like "total per entity" vs "average", compute per-entity aggregates in a subquery, then compare to AVG of those aggregates"""
+14. For comparisons like "total per entity" vs "average", compute per-entity aggregates in a subquery, then compare to AVG of those aggregates
+15. When the user says "filter", "sort", "also show", "add", "those", "that list", "them", etc., they are refining the PREVIOUS query in this conversation. Build on the last SQL you generated — do not start from scratch."""
 
         full_prompt = f"""Schema:
 {schema_context}
@@ -126,7 +157,20 @@ SQL query:"""
         
         try:
             logger.debug(f"SQL generation: model={self.llm_model}, url={self.llm_api_url}")
-            raw = await self._call_chat_completions(system_prompt, full_prompt)
+
+            # Thread-aware path: include prior exchanges as conversation history
+            if thread_history:
+                messages = [{"role": "system", "content": system_prompt}]
+                for entry in thread_history:
+                    messages.append({"role": "user", "content": f"User Question: {entry['prompt']}\n\nSQL query:"})
+                    messages.append({"role": "assistant", "content": entry["sql"]})
+                # Current prompt with full schema context
+                messages.append({"role": "user", "content": full_prompt})
+                logger.info(f"Thread-aware SQL generation: {len(thread_history)} prior exchanges")
+                raw = await self._call_chat_with_messages(messages)
+            else:
+                raw = await self._call_chat_completions(system_prompt, full_prompt)
+
             sql = self._clean_sql_output(raw)
             return sql
         

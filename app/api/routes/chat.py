@@ -2,6 +2,7 @@
 
 import json
 import time
+import uuid
 from decimal import Decimal
 from datetime import datetime, date
 from fastapi import APIRouter, HTTPException, Depends, Request, Query as QParam
@@ -34,7 +35,8 @@ def _safe_json(obj):
 
 
 # ── Helper: persist a chat exchange to chat_history ───
-def _save_chat_history(user: dict, connection_id: int, prompt: str, result: dict):
+def _save_chat_history(user: dict, connection_id: int, prompt: str, result: dict,
+                      thread_id: str = None, thread_title: str = None):
     """Fire-and-forget save of a chat exchange (never raises)."""
     try:
         db = SessionLocal()
@@ -56,6 +58,8 @@ def _save_chat_history(user: dict, connection_id: int, prompt: str, result: dict
                 selected_tables=json.dumps(sel_tables, default=_safe_json) if sel_tables else None,
                 status=result.get("status", "error"),
                 error_message=result.get("error"),
+                thread_id=thread_id,
+                thread_title=thread_title,
             )
             db.add(entry)
             db.commit()
@@ -74,6 +78,8 @@ def _save_chat_history(user: dict, connection_id: int, prompt: str, result: dict
 class ChatHistoryItem(BaseModel):
     id: int
     connection_id: int
+    thread_id: Optional[str] = None
+    thread_title: Optional[str] = None
     prompt: str
     answer: Optional[str] = None
     sql: Optional[str] = None
@@ -90,17 +96,22 @@ class ChatHistoryItem(BaseModel):
 @router.get("/history", response_model=List[ChatHistoryItem])
 async def get_chat_history(
     connection_id: int = QParam(..., description="Database connection ID"),
+    thread_id: Optional[str] = QParam(None, description="Thread ID to filter by"),
     limit: int = QParam(50, ge=1, le=200),
     user: dict = Depends(get_current_user),
 ):
-    """Return the current user's chat history for a specific database."""
+    """Return the current user's chat history for a specific database (optionally scoped to a thread)."""
     db = SessionLocal()
     try:
-        entries = (
+        q = (
             db.query(ChatHistory)
             .filter(ChatHistory.user_id == int(user["sub"]),
                     ChatHistory.connection_id == connection_id)
-            .order_by(ChatHistory.created_at.asc())
+        )
+        if thread_id:
+            q = q.filter(ChatHistory.thread_id == thread_id)
+        entries = (
+            q.order_by(ChatHistory.created_at.asc())
             .limit(limit)
             .all()
         )
@@ -109,6 +120,8 @@ async def get_chat_history(
             items.append(ChatHistoryItem(
                 id=e.id,
                 connection_id=e.connection_id,
+                thread_id=e.thread_id,
+                thread_title=e.thread_title,
                 prompt=e.prompt,
                 answer=e.answer,
                 sql=e.sql,
@@ -149,11 +162,13 @@ class ChatRequest(BaseModel):
     connection_id: int
     prompt: str
     top_k_tables: int = 5  # Number of relevant tables to use
+    thread_id: Optional[str] = None  # If None, creates a new thread
 
 
 class ChatResponse(BaseModel):
     """Chat response model"""
     status: str
+    thread_id: Optional[str] = None
     answer: Optional[str] = None
     sql: Optional[str] = None
     rows: Optional[List[Dict[str, Any]]] = None
@@ -185,12 +200,40 @@ async def chat(
     try:
         logger.info(f"Chat request: connection={request.connection_id}, prompt='{request.prompt[:50]}'")
         chat_service = ChatService()
+
+        # ── Thread management ──────────────────────────
+        thread_id = request.thread_id or str(uuid.uuid4())
+        is_new_thread = request.thread_id is None
+
+        # Fetch thread history if continuing a thread
+        thread_history = []
+        if not is_new_thread:
+            th_db = SessionLocal()
+            try:
+                entries = (
+                    th_db.query(ChatHistory)
+                    .filter(
+                        ChatHistory.thread_id == thread_id,
+                        ChatHistory.status == "success",
+                        ChatHistory.sql.isnot(None),
+                    )
+                    .order_by(ChatHistory.created_at.asc())
+                    .all()
+                )
+                thread_history = [{"prompt": e.prompt, "sql": e.sql} for e in entries]
+                logger.info(f"Thread {thread_id}: loaded {len(thread_history)} prior exchanges")
+            finally:
+                th_db.close()
+
+        # Auto-generate thread title from first prompt
+        thread_title = request.prompt[:80].strip() if is_new_thread else None
         
         try:
             result = await chat_service.process_query(
                 connection_id=request.connection_id,
                 user_prompt=request.prompt,
-                top_k_tables=request.top_k_tables
+                top_k_tables=request.top_k_tables,
+                thread_history=thread_history if thread_history else None
             )
             dur = int((time.time() - t0) * 1000)
             await log_activity(req, user=user, action=Actions.CHAT_QUERY,
@@ -199,12 +242,15 @@ async def chat(
                                detail={"prompt": request.prompt[:200],
                                        "row_count": result.get("row_count"),
                                        "sql": (result.get("sql") or "")[:300],
-                                       "status": result.get("status")},
+                                       "status": result.get("status"),
+                                       "thread_id": thread_id},
                                duration_ms=dur)
             # Persist chat exchange for per-user history
-            _save_chat_history(user, request.connection_id, request.prompt, result)
+            _save_chat_history(user, request.connection_id, request.prompt, result,
+                               thread_id=thread_id, thread_title=thread_title)
             return ChatResponse(
                 status=result.get("status", "error"),
+                thread_id=thread_id,
                 answer=result.get("answer"),
                 sql=result.get("sql"),
                 rows=result.get("rows"),
@@ -364,3 +410,123 @@ async def explain_query(
     except Exception as e:
         logger.error(f"Explain endpoint error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ══════════════════════════════════════════════════════
+#  THREAD MANAGEMENT ENDPOINTS
+# ══════════════════════════════════════════════════════
+
+class ThreadSummary(BaseModel):
+    thread_id: str
+    thread_title: Optional[str] = None
+    message_count: int
+    last_prompt: str
+    last_at: str
+
+
+@router.get("/threads", response_model=List[ThreadSummary])
+async def list_threads(
+    connection_id: int = QParam(..., description="Database connection ID"),
+    user: dict = Depends(get_current_user),
+):
+    """List all threads for the current user + connection, most recent first."""
+    from sqlalchemy import func, desc
+
+    db = SessionLocal()
+    try:
+        # Sub-query: for each thread_id, get count, max created_at, first title
+        rows = (
+            db.query(
+                ChatHistory.thread_id,
+                func.count(ChatHistory.id).label("cnt"),
+                func.max(ChatHistory.created_at).label("last_at"),
+            )
+            .filter(
+                ChatHistory.user_id == int(user["sub"]),
+                ChatHistory.connection_id == connection_id,
+                ChatHistory.thread_id.isnot(None),
+            )
+            .group_by(ChatHistory.thread_id)
+            .order_by(desc("last_at"))
+            .all()
+        )
+
+        result = []
+        for r in rows:
+            # Fetch title from the first message of this thread
+            first_msg = (
+                db.query(ChatHistory)
+                .filter(ChatHistory.thread_id == r.thread_id)
+                .order_by(ChatHistory.created_at.asc())
+                .first()
+            )
+            # Fetch last prompt
+            last_msg = (
+                db.query(ChatHistory)
+                .filter(ChatHistory.thread_id == r.thread_id)
+                .order_by(ChatHistory.created_at.desc())
+                .first()
+            )
+            result.append(ThreadSummary(
+                thread_id=r.thread_id,
+                thread_title=first_msg.thread_title if first_msg else None,
+                message_count=r.cnt,
+                last_prompt=last_msg.prompt[:120] if last_msg else "",
+                last_at=r.last_at.isoformat() if r.last_at else "",
+            ))
+        return result
+    finally:
+        db.close()
+
+
+class ThreadRenameRequest(BaseModel):
+    title: str
+
+
+@router.put("/threads/{thread_id}/title")
+async def rename_thread(
+    thread_id: str,
+    body: ThreadRenameRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Rename a thread (updates thread_title on the first message)."""
+    db = SessionLocal()
+    try:
+        first = (
+            db.query(ChatHistory)
+            .filter(
+                ChatHistory.thread_id == thread_id,
+                ChatHistory.user_id == int(user["sub"]),
+            )
+            .order_by(ChatHistory.created_at.asc())
+            .first()
+        )
+        if not first:
+            raise HTTPException(status_code=404, detail="Thread not found")
+        first.thread_title = body.title.strip()[:255]
+        db.commit()
+        return {"thread_id": thread_id, "title": first.thread_title}
+    finally:
+        db.close()
+
+
+@router.delete("/threads/{thread_id}")
+async def delete_thread(
+    thread_id: str,
+    user: dict = Depends(get_current_user),
+):
+    """Delete all messages in a thread."""
+    db = SessionLocal()
+    try:
+        deleted = (
+            db.query(ChatHistory)
+            .filter(
+                ChatHistory.thread_id == thread_id,
+                ChatHistory.user_id == int(user["sub"]),
+            )
+            .delete(synchronize_session=False)
+        )
+        db.commit()
+        return {"deleted": deleted}
+    finally:
+        db.close()

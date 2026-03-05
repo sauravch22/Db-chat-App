@@ -36,6 +36,27 @@ async def lifespan(app: FastAPI):
             conn.commit()
             logger.info("Migrated: added connection_id column to user_permissions")
 
+    # Migration: add thread_id / thread_title columns to chat_history
+    with engine.connect() as conn:
+        insp = sa_inspect(engine)
+        if "chat_history" in insp.get_table_names():
+            cols = [c["name"] for c in insp.get_columns("chat_history")]
+            if "thread_id" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE chat_history ADD COLUMN thread_id VARCHAR(36)"
+                ))
+                conn.execute(text(
+                    "CREATE INDEX ix_chat_history_thread_id ON chat_history(thread_id)"
+                ))
+                conn.commit()
+                logger.info("Migrated: added thread_id column to chat_history")
+            if "thread_title" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE chat_history ADD COLUMN thread_title VARCHAR(255)"
+                ))
+                conn.commit()
+                logger.info("Migrated: added thread_title column to chat_history")
+
     # Seed default admin user with global + per-DB permissions
     from app.database import SessionLocal
     from app.services.auth_service import (

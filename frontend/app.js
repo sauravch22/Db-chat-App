@@ -5,6 +5,10 @@ let chartIdx = 0;
 let authToken = localStorage.getItem('dbchat_token') || null;
 let currentUser = null; // { username, perms: {"*":["db_onboard"], "3":[...]} }
 
+// Thread state
+let currentThreadId = null;   // active thread UUID (null = new thread)
+let selectedConnId = null;    // current DB connection
+
 // Store last response data for the detail explorer
 let lastResponseRows = [];
 let lastResponseCols = [];
@@ -242,10 +246,10 @@ async function loadDatabases() {
             o.value = db.id; o.textContent = db.name; sel.appendChild(o);
         });
         selectedConnId = sorted[0].id;
-        sel.onchange = () => { selectedConnId = +sel.value; clearChat(); loadChatHistory(); };
+        sel.onchange = () => { selectedConnId = +sel.value; startNewThread(); loadThreads(); };
 
-        // Load history for initial DB
-        await loadChatHistory();
+        // Load threads for initial DB
+        await loadThreads();
     } catch(e) {
         if (e.message && e.message.includes('Session expired')) return;
         sel.innerHTML = '<option value="">No databases</option>';
@@ -273,12 +277,27 @@ async function sendMessage() {
     setTyping(true);
 
     try {
+        const body = {
+            connection_id: selectedConnId || 3,
+            prompt: q,
+        };
+        if (currentThreadId) body.thread_id = currentThreadId;
+
         const r = await authFetch(`${chatUrl()}/api/chat`, {
             method: 'POST',
-            body: JSON.stringify({ connection_id: selectedConnId || 3, prompt: q })
+            body: JSON.stringify(body)
         });
         const data = await r.json();
         setTyping(false);
+
+        // Capture the thread_id returned by the backend
+        if (data.thread_id) {
+            const isNewThread = !currentThreadId;
+            currentThreadId = data.thread_id;
+            // Refresh thread sidebar (new thread or updated timestamp)
+            loadThreads();
+        }
+
         if (r.status === 403) {
             addBotError('Permission denied: you don\'t have "prompt_query" access on this database.');
         } else if (data.status === 'error') {
@@ -316,13 +335,17 @@ function clearChat() {
     lastResponseRows = [];
     lastResponseCols = [];
     chartIdx = 0;
+    // Do NOT reset currentThreadId here — that's managed by startNewThread/selectThread
 }
 
-// ─── Load persisted chat history for current DB ──────
-async function loadChatHistory() {
+// ─── Load persisted chat history for current thread ──
+async function loadChatHistory(threadId) {
     if (!selectedConnId) return;
+    const tid = threadId || currentThreadId;
+    if (!tid) return;  // no thread selected → keep welcome
+
     try {
-        const r = await authFetch(`${chatUrl()}/api/chat/history?connection_id=${selectedConnId}&limit=50`);
+        const r = await authFetch(`${chatUrl()}/api/chat/history?connection_id=${selectedConnId}&thread_id=${tid}&limit=50`);
         if (!r.ok) return;
         const items = await r.json();
         if (!items.length) return;         // keep welcome message
@@ -334,9 +357,10 @@ async function loadChatHistory() {
         // History header
         const hdr = document.createElement('div');
         hdr.className = 'flex items-center justify-between px-2 py-2 mb-2';
+        const title = items[0]?.thread_title || items[0]?.prompt?.substring(0, 50) || 'Thread';
         hdr.innerHTML = `
-            <span class="text-xs text-d-muted">📜 ${items.length} previous conversation${items.length > 1 ? 's' : ''}</span>
-            <button onclick="clearChatHistory()" class="text-xs text-red-400 hover:text-red-300 underline">Clear history</button>`;
+            <span class="text-xs text-d-muted">🧵 ${esc(title)} · ${items.length} message${items.length > 1 ? 's' : ''}</span>
+            <button onclick="clearChatHistory()" class="text-xs text-red-400 hover:text-red-300 underline">Clear thread</button>`;
         el.appendChild(hdr);
 
         for (const item of items) {
@@ -370,11 +394,87 @@ function logger_warn(msg, e) { try { console.warn(msg, e); } catch(_) {} }
 
 async function clearChatHistory() {
     if (!selectedConnId) return;
-    if (!confirm('Clear all your chat history for this database?')) return;
+    if (!confirm('Clear all messages in this thread?')) return;
     try {
-        await authFetch(`${chatUrl()}/api/chat/history?connection_id=${selectedConnId}`, { method: 'DELETE' });
+        if (currentThreadId) {
+            await authFetch(`${chatUrl()}/api/chat/threads/${currentThreadId}`, { method: 'DELETE' });
+        } else {
+            await authFetch(`${chatUrl()}/api/chat/history?connection_id=${selectedConnId}`, { method: 'DELETE' });
+        }
     } catch (_) {}
+    currentThreadId = null;
     clearChat();
+    loadThreads();
+}
+
+// ═════════════════════════════════════════════════════
+//  THREAD SIDEBAR – list, select, create, delete
+// ═════════════════════════════════════════════════════
+
+function startNewThread() {
+    currentThreadId = null;
+    clearChat();
+    highlightActiveThread();
+    document.getElementById('queryInput')?.focus();
+}
+
+async function loadThreads() {
+    if (!selectedConnId) return;
+    const listEl = document.getElementById('threadList');
+    try {
+        const r = await authFetch(`${chatUrl()}/api/chat/threads?connection_id=${selectedConnId}`);
+        if (!r.ok) { listEl.innerHTML = '<p class="text-[11px] text-d-muted p-3 text-center">No threads yet</p>'; return; }
+        const threads = await r.json();
+
+        if (!threads.length) {
+            listEl.innerHTML = '<p class="text-[11px] text-d-muted p-3 text-center">No threads yet</p>';
+            return;
+        }
+
+        let h = '';
+        threads.forEach(t => {
+            const title = t.thread_title || t.last_prompt?.substring(0, 40) || 'Untitled';
+            const ago = relativeTime(new Date(t.last_at));
+            const isActive = t.thread_id === currentThreadId;
+            h += `<div class="thread-item${isActive ? ' active' : ''}" data-tid="${t.thread_id}" onclick="selectThread('${t.thread_id}')">
+                <div style="flex:1;min-width:0">
+                    <div class="thread-title" title="${escAttr(title)}">${esc(title)}</div>
+                    <div class="thread-meta">${t.message_count} msg · ${ago}</div>
+                </div>
+                <span class="thread-del" onclick="event.stopPropagation();deleteThread('${t.thread_id}')" title="Delete thread">✕</span>
+            </div>`;
+        });
+        listEl.innerHTML = h;
+    } catch (e) {
+        logger_warn('loadThreads failed', e);
+    }
+}
+
+async function selectThread(threadId) {
+    currentThreadId = threadId;
+    clearChat();
+    highlightActiveThread();
+    await loadChatHistory(threadId);
+}
+
+function highlightActiveThread() {
+    document.querySelectorAll('#threadList .thread-item').forEach(el => {
+        el.classList.toggle('active', el.dataset.tid === currentThreadId);
+    });
+}
+
+async function deleteThread(threadId) {
+    if (!confirm('Delete this thread and all its messages?')) return;
+    try {
+        await authFetch(`${chatUrl()}/api/chat/threads/${threadId}`, { method: 'DELETE' });
+        if (currentThreadId === threadId) {
+            currentThreadId = null;
+            clearChat();
+        }
+        loadThreads();
+    } catch (e) {
+        logger_warn('deleteThread failed', e);
+    }
 }
 
 // ─── User bubble ─────────────────────────────────────
