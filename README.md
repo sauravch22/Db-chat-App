@@ -45,6 +45,7 @@ Business teams drown in data they **can't access**. Every "quick question" — *
 
 ---
 
+
 ## Capabilities
 
 | | Feature | Description |
@@ -65,6 +66,37 @@ Business teams drown in data they **can't access**. Every "quick question" — *
 | 🗄️ | **Multi-DB Support** | Connect PostgreSQL, MySQL, or SQL Server databases. Register as many as needed; each has its own schema index and permission scope. |
 
 ---
+
+## DbChat in Action
+
+### 1. Conversational Chat, Threads, and Smart Onboarding
+![DbChat Chat Interface](./screenshots/dbchat_chat_threads_welcome.png)
+*The main chat interface: thread-based conversations (sidebar), dynamic LLM-generated welcome (database summary + 7 query suggestions), and a user query with tabular results. Demonstrates natural language to SQL, thread management, and onboarding UX.*
+
+### 2. Visualizations — Automatic Chart Recommendations
+![DbChat Chart Recommendation](./screenshots/dbchat_chart_recommendation.png)
+*Automatic chart recommendations for every result. Here, a donut chart visualizes album counts by artist, with a color-coded legend and values.*
+
+### 3. Explainability — Query Explanation Modal
+![DbChat Query Explanation](./screenshots/dbchat_query_explanation.png)
+*Step-by-step LLM-generated SQL explanations. The modal breaks down what the query does, tables used, joins, filters, calculations, and sorting.*
+
+### 4. Dashboards — Pin Queries and Charts
+![DbChat Dashboard](./screenshots/dbchat_dashboard.png)
+*Pin queries and charts to live dashboards. Mix tabular and visual results, with live data refresh and flexible layout.*
+
+### 5. Audit Trail — Activity Log
+![DbChat Activity Log](./screenshots/dbchat_activity_log.png)
+*Full activity audit log for compliance and transparency. Filter by database, action, status, and time window; see every query and action performed.*
+
+### 6. Admin & Onboarding — Register New Database
+![DbChat Admin Onboard](./screenshots/dbchat_admin_onboard.png)
+*Admin UI for onboarding new databases. Register any supported database type, with schema extraction and indexing handled automatically.*
+
+### 7. Admin & User Management — Per-DB Permissions
+![DbChat Admin User Management](./screenshots/dbchat_admin_user_management.png)
+*Admin UI for managing per-user, per-database permissions. Grant admin, reindex, and query rights, and view user logs for each database.*
+
 
 # PAGE 2 — ARCHITECTURE (Deep Dive)
 
