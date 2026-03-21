@@ -147,6 +147,25 @@
         .thread-item .thread-del{display:none;position:absolute;right:6px;top:50%;transform:translateY(-50%);background:#1b1e27;border:1px solid #252938;border-radius:4px;color:#6b7084;font-size:10px;padding:1px 5px;cursor:pointer}
         .thread-item:hover .thread-del{display:block}
         .thread-item .thread-del:hover{color:#f87171;border-color:#f87171}
+
+        /* ─── Pagination controls ─── */
+        .page-controls{display:flex;align-items:center;justify-content:center;gap:6px;margin-top:8px}
+        .page-btn{font-size:11px;padding:4px 10px;border-radius:6px;border:1px solid #252938;background:#1b1e27;color:#6b7084;cursor:pointer;transition:all .15s}
+        .page-btn:hover:not(:disabled){color:#dfe1e8;border-color:#7c6eff;background:#1f2330}
+        .page-btn:disabled{opacity:.3;cursor:not-allowed}
+        .page-btn.active{background:rgba(124,110,255,.2);color:#a78bfa;border-color:#7c6eff;font-weight:600}
+        .page-info{font-size:11px;color:#6b7084}
+
+        /* ─── Export buttons ─── */
+        .export-btn{display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:4px 10px;border-radius:6px;border:1px solid #252938;background:#1b1e27;color:#34d399;cursor:pointer;transition:all .15s}
+        .export-btn:hover{border-color:#34d399;background:#1f2330;color:#6ee7b7}
+
+        /* ─── Saved Queries ─── */
+        .sq-card{background:#13161d;border:1px solid #252938;border-radius:10px;padding:14px 16px;transition:border-color .15s;cursor:pointer}
+        .sq-card:hover{border-color:#7c6eff}
+        .sq-fav{color:#4a4f65;cursor:pointer;transition:color .15s;font-size:16px}
+        .sq-fav:hover,.sq-fav.on{color:#fbbf24}
+        .sq-folder-badge{font-size:10px;padding:2px 8px;border-radius:4px;background:rgba(124,110,255,.12);color:#a78bfa;font-weight:500}
     </style>
 </head>
 <body class="h-screen flex flex-col overflow-hidden">
@@ -212,13 +231,14 @@
                     <button onclick="doLogout()" class="text-xs text-d-muted hover:text-d-red border border-d-border rounded-lg px-3 py-1.5 transition" title="Sign out">Logout</button>
                 </div>
             </div>
-            <input type="hidden" id="chatUrl" value="http://localhost:8000">
+            <input type="hidden" id="chatUrl" value="">
             <input type="hidden" id="vizUrl" value="http://localhost:8001">
         </header>
 
         <!-- Tab bar -->
         <div id="tabBar" class="tab-bar">
             <button class="tab-btn active" onclick="switchTab('chat')" id="tabChat">💬 Chat</button>
+            <button class="tab-btn" onclick="switchTab('saved')" id="tabSaved">⭐ Saved Queries</button>
             <button class="tab-btn" onclick="switchTab('dashboard')" id="tabDashboard">📊 Dashboards</button>
             <button class="tab-btn" onclick="switchTab('admin')" id="tabAdmin" style="display:none">👥 Admin</button>
             <button class="tab-btn" onclick="switchTab('activity')" id="tabActivity">📋 My Activity</button>
@@ -502,6 +522,69 @@
             </div>
         </div><!-- /dashboardTab -->
 
+        <!-- Saved Queries Tab (hidden by default) -->
+        <div id="savedTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-5xl mx-auto">
+                <div class="flex items-center justify-between mb-5">
+                    <div>
+                        <h2 class="text-lg font-semibold text-white">Saved Queries</h2>
+                        <p class="text-xs text-d-muted mt-1">Your bookmarked queries — re-run any of them instantly.</p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <select id="sqDbFilter" class="col-select" onchange="loadSavedQueries()">
+                            <option value="">All databases</option>
+                        </select>
+                        <select id="sqFolderFilter" class="col-select" onchange="loadSavedQueries()">
+                            <option value="">All folders</option>
+                        </select>
+                        <label class="flex items-center gap-1 text-xs text-d-muted cursor-pointer">
+                            <input type="checkbox" id="sqFavOnly" onchange="loadSavedQueries()" style="accent-color:#fbbf24">
+                            ⭐ Favorites
+                        </label>
+                        <button onclick="loadSavedQueries()" class="chip">↻ Refresh</button>
+                    </div>
+                </div>
+                <div id="savedQueryGrid" class="grid gap-3" style="grid-template-columns:repeat(auto-fill,minmax(340px,1fr))">
+                    <p class="text-sm text-d-muted">Loading saved queries…</p>
+                </div>
+            </div>
+        </div><!-- /savedTab -->
+
+        <!-- Save Query Modal -->
+        <div id="saveQueryModal" class="modal-overlay" onclick="if(event.target===this)closeSaveQueryModal()">
+            <div class="modal-box" style="max-width:480px">
+                <div class="modal-header">
+                    <h3 class="text-sm font-semibold text-white flex-1">⭐ Save Query</h3>
+                    <button class="modal-close" onclick="closeSaveQueryModal()">✕</button>
+                </div>
+                <div class="modal-body" style="padding:20px">
+                    <div class="space-y-4">
+                        <div>
+                            <label class="text-xs text-d-muted font-semibold uppercase block mb-1.5">Query Name</label>
+                            <input id="sqName" class="search-input" placeholder="e.g. Monthly Revenue Report">
+                        </div>
+                        <div>
+                            <label class="text-xs text-d-muted font-semibold uppercase block mb-1.5">Description (optional)</label>
+                            <input id="sqDesc" class="search-input" placeholder="Brief description…">
+                        </div>
+                        <div>
+                            <label class="text-xs text-d-muted font-semibold uppercase block mb-1.5">Folder (optional)</label>
+                            <input id="sqFolder" class="search-input" placeholder="e.g. Finance, Marketing…" list="sqFolderList">
+                            <datalist id="sqFolderList"></datalist>
+                        </div>
+                        <div>
+                            <label class="flex items-center gap-2 text-xs text-d-muted cursor-pointer">
+                                <input type="checkbox" id="sqFavorite" style="accent-color:#fbbf24">
+                                Mark as favorite ⭐
+                            </label>
+                        </div>
+                        <div id="sqError" class="text-xs text-red-400" style="min-height:18px"></div>
+                        <button onclick="submitSaveQuery()" id="sqSubmitBtn" class="w-full" style="background:#7c6eff;color:#fff;border:none;border-radius:10px;padding:10px;font-size:13px;font-weight:600;cursor:pointer;transition:background .15s">⭐ Save Query</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- User Activity Modal -->
         <div id="userActivityModal" style="display:none" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
             <div class="bg-d-card border border-d-border rounded-2xl shadow-2xl w-full max-w-4xl max-h-[85vh] flex flex-col" style="margin:20px">
@@ -622,6 +705,8 @@
                     </div>
                     <span id="detailCount" class="text-xs text-d-muted whitespace-nowrap">0 rows</span>
                 </div>
+                <button onclick="exportDetailCSV()" class="export-btn" style="font-size:11px">⬇ CSV</button>
+                <button onclick="exportDetailJSON()" class="export-btn" style="font-size:11px">⬇ JSON</button>
                 <button class="modal-close" onclick="closeDetailModal()">✕</button>
             </div>
             <div class="modal-body" id="detailBody" style="padding:0"></div>
@@ -639,7 +724,7 @@
         </div>
     </div>
 
-    <script src="app.js?v=13.0"></script>
+    <script src="app.js?v=14.0"></script>
     <style>@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}</style>
 </body>
 </html>

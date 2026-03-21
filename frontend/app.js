@@ -576,22 +576,34 @@ async function addBotReply(query, data) {
     let exploreBtnId = null;
     let pinDataBtnId = null;
     let explainBtnId = null;
+    let exportCsvBtnId = null;
+    let exportJsonBtnId = null;
+    let saveQueryBtnId = null;
     if (data.rows?.length && data.columns?.length) {
-        h += buildTable(data.columns, data.rows, 30, data.row_count);
+        h += buildTable(data.columns, data.rows, 25, data.row_count);
         h += `<div class="flex flex-wrap gap-2 mt-1">`;
         exploreBtnId = 'explore-' + Date.now();
-        h += `<button id="${exploreBtnId}" class="chip">🔍 Explore full data (${Math.min(data.row_count||data.rows.length, 100)} rows)</button>`;
+        h += `<button id="${exploreBtnId}" class="chip">🔍 Explore (${Math.min(data.row_count||data.rows.length, 100)} rows)</button>`;
+        exportCsvBtnId = 'csv-' + Date.now();
+        h += `<button id="${exportCsvBtnId}" class="export-btn">⬇ CSV</button>`;
+        exportJsonBtnId = 'json-' + Date.now();
+        h += `<button id="${exportJsonBtnId}" class="export-btn">⬇ JSON</button>`;
         if (data.sql) {
             pinDataBtnId = 'pin-data-' + Date.now();
-            h += `<button id="${pinDataBtnId}" class="chip" style="color:#fbbf24;border-color:rgba(251,191,36,.3)">📌 Pin Data</button>`;
+            h += `<button id="${pinDataBtnId}" class="chip" style="color:#fbbf24;border-color:rgba(251,191,36,.3)">📌 Pin</button>`;
+            saveQueryBtnId = 'save-' + Date.now();
+            h += `<button id="${saveQueryBtnId}" class="chip" style="color:#34d399;border-color:rgba(52,211,153,.3)">⭐ Save</button>`;
             explainBtnId = 'explain-' + Date.now();
             h += `<button id="${explainBtnId}" class="chip" style="color:#a78bfa;border-color:rgba(167,139,250,.3)">🧠 Explain</button>`;
         }
         h += `</div>`;
     } else if (data.sql) {
-        // No rows but we have SQL (e.g. catalog query) — still show explain
         explainBtnId = 'explain-' + Date.now();
-        h += `<div class="flex flex-wrap gap-2 mt-1"><button id="${explainBtnId}" class="chip" style="color:#a78bfa;border-color:rgba(167,139,250,.3)">🧠 Explain</button></div>`;
+        saveQueryBtnId = 'save-' + Date.now();
+        h += `<div class="flex flex-wrap gap-2 mt-1">`;
+        h += `<button id="${saveQueryBtnId}" class="chip" style="color:#34d399;border-color:rgba(52,211,153,.3)">⭐ Save</button>`;
+        h += `<button id="${explainBtnId}" class="chip" style="color:#a78bfa;border-color:rgba(167,139,250,.3)">🧠 Explain</button>`;
+        h += `</div>`;
     }
 
     const chartAreaId = 'crec-' + Date.now();
@@ -663,14 +675,64 @@ async function addBotReply(query, data) {
         }
     }
 
+    // Attach export CSV handler
+    if (exportCsvBtnId) {
+        const csvBtn = document.getElementById(exportCsvBtnId);
+        if (csvBtn) {
+            csvBtn.onclick = () => exportCSV(data.columns, data.rows, 'dbchat_export_' + Date.now());
+        }
+    }
+
+    // Attach export JSON handler
+    if (exportJsonBtnId) {
+        const jsonBtn = document.getElementById(exportJsonBtnId);
+        if (jsonBtn) {
+            jsonBtn.onclick = () => exportJSON(data.columns, data.rows, 'dbchat_export_' + Date.now());
+        }
+    }
+
+    // Attach save query handler
+    if (saveQueryBtnId) {
+        const saveBtn = document.getElementById(saveQueryBtnId);
+        if (saveBtn) {
+            saveBtn.onclick = () => openSaveQueryModal(query, data.sql);
+        }
+    }
+
     if (data.rows?.length && data.columns?.length) {
         await fetchChartChips(chartAreaId, data.columns, data.rows, query, data.sql);
     }
 }
 
-// ─── Build data table ────────────────────────────────
-function buildTable(cols, rows, maxRows, totalRows) {
-    const show = rows.slice(0, maxRows);
+// ─── Build data table with pagination ─────────────────
+let tablePageStates = {};
+
+function buildTable(cols, rows, maxRows, totalRows, tableId) {
+    const tid = tableId || ('tbl-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6));
+    const pageSize = maxRows || 25;
+    const total = rows.length;
+    const totalPages = Math.ceil(total / pageSize);
+
+    tablePageStates[tid] = { cols, rows, pageSize, currentPage: 1, totalRows: totalRows || total };
+
+    let h = `<div id="${tid}-wrap">`;
+    h += _renderTablePage(tid, 1);
+    if (totalPages > 1) {
+        h += _renderPageControls(tid, 1, totalPages, total);
+    } else if (total > 0 && (totalRows || total) > total) {
+        h += `<p class="text-xs text-d-muted mt-1">Showing ${total} of ${totalRows || total} rows</p>`;
+    }
+    h += `</div>`;
+    return h;
+}
+
+function _renderTablePage(tid, page) {
+    const state = tablePageStates[tid];
+    if (!state) return '';
+    const { cols, rows, pageSize } = state;
+    const start = (page - 1) * pageSize;
+    const show = rows.slice(start, start + pageSize);
+
     let h = `<div class="rounded-lg border border-d-border overflow-hidden" style="max-height:420px;overflow:auto">
         <table class="dt"><thead><tr>${cols.map(c=>`<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>`;
     show.forEach(row => {
@@ -683,8 +745,43 @@ function buildTable(cols, rows, maxRows, totalRows) {
         h += '</tr>';
     });
     h += '</tbody></table></div>';
-    if ((totalRows||rows.length) > maxRows) h += `<p class="text-xs text-d-muted mt-1">Showing ${maxRows} of ${totalRows||rows.length} rows</p>`;
     return h;
+}
+
+function _renderPageControls(tid, currentPage, totalPages, totalRows) {
+    let h = `<div class="page-controls" id="${tid}-pages">`;
+    h += `<button class="page-btn" onclick="goTablePage('${tid}',1)" ${currentPage===1?'disabled':''}>«</button>`;
+    h += `<button class="page-btn" onclick="goTablePage('${tid}',${currentPage-1})" ${currentPage===1?'disabled':''}>‹</button>`;
+
+    const maxBtns = 5;
+    let startP = Math.max(1, currentPage - Math.floor(maxBtns / 2));
+    let endP = Math.min(totalPages, startP + maxBtns - 1);
+    if (endP - startP < maxBtns - 1) startP = Math.max(1, endP - maxBtns + 1);
+
+    for (let p = startP; p <= endP; p++) {
+        h += `<button class="page-btn${p===currentPage?' active':''}" onclick="goTablePage('${tid}',${p})">${p}</button>`;
+    }
+
+    h += `<button class="page-btn" onclick="goTablePage('${tid}',${currentPage+1})" ${currentPage===totalPages?'disabled':''}>›</button>`;
+    h += `<button class="page-btn" onclick="goTablePage('${tid}',${totalPages})" ${currentPage===totalPages?'disabled':''}>»</button>`;
+    h += `<span class="page-info">${totalRows} rows</span>`;
+    h += `</div>`;
+    return h;
+}
+
+function goTablePage(tid, page) {
+    const state = tablePageStates[tid];
+    if (!state) return;
+    const totalPages = Math.ceil(state.rows.length / state.pageSize);
+    if (page < 1 || page > totalPages) return;
+    state.currentPage = page;
+
+    const wrap = document.getElementById(tid + '-wrap');
+    if (!wrap) return;
+
+    let h = _renderTablePage(tid, page);
+    h += _renderPageControls(tid, page, totalPages, state.rows.length);
+    wrap.innerHTML = h;
 }
 
 // ─── Fetch chart recommendations → chips ─────────────
@@ -895,6 +992,29 @@ function openDetailModal(cols, rows) {
     document.getElementById('detailModal').classList.add('open');
 }
 
+function exportDetailCSV() {
+    const filtered = _getFilteredDetailRows();
+    exportCSV(detailCols, filtered, 'explorer_export_' + Date.now());
+}
+
+function exportDetailJSON() {
+    const filtered = _getFilteredDetailRows();
+    exportJSON(detailCols, filtered, 'explorer_export_' + Date.now());
+}
+
+function _getFilteredDetailRows() {
+    const col = document.getElementById('detailCol').value;
+    const rawPattern = document.getElementById('detailSearch').value;
+    if (!rawPattern) return detailAllRows;
+    try {
+        const re = new RegExp(rawPattern, 'i');
+        return detailAllRows.filter(row => {
+            if (col === '__all__') return detailCols.some(c => re.test(String(row[c] ?? '')));
+            return re.test(String(row[col] ?? ''));
+        });
+    } catch { return detailAllRows; }
+}
+
 function closeDetailModal() {
     document.getElementById('detailModal').classList.remove('open');
 }
@@ -957,21 +1077,33 @@ function filterDetailTable() {
     renderDetailTable(filtered, re, col);
 }
 
+let detailPage = 1;
+const DETAIL_PAGE_SIZE = 50;
+
 function renderDetailTable(rows, re, filterCol) {
+    detailPage = 1;
+    _renderDetailPage(rows, re, filterCol);
+}
+
+function _renderDetailPage(rows, re, filterCol) {
     const body = document.getElementById('detailBody');
     if (!rows.length || !detailCols.length) {
         body.innerHTML = '<p class="p-6 text-sm text-d-muted">No matching rows.</p>';
         return;
     }
 
-    let h = '<div style="overflow:auto;max-height:calc(88vh - 80px)"><table class="dt"><thead><tr>';
+    const totalPages = Math.ceil(rows.length / DETAIL_PAGE_SIZE);
+    const start = (detailPage - 1) * DETAIL_PAGE_SIZE;
+    const pageRows = rows.slice(start, start + DETAIL_PAGE_SIZE);
+
+    let h = '<div style="overflow:auto;max-height:calc(88vh - 130px)"><table class="dt"><thead><tr>';
     h += '<th style="width:40px">#</th>';
     detailCols.forEach(c => h += `<th>${esc(c)}</th>`);
     h += '</tr></thead><tbody>';
 
-    rows.forEach((row, idx) => {
+    pageRows.forEach((row, idx) => {
         h += '<tr>';
-        h += `<td style="color:#4a4f65">${idx+1}</td>`;
+        h += `<td style="color:#4a4f65">${start + idx + 1}</td>`;
         detailCols.forEach(c => {
             const v = row[c]; let s = v != null ? String(v) : '—';
             const isN = typeof v==='number'||(typeof v==='string'&&v!==''&&!isNaN(+v)&&isFinite(v));
@@ -984,9 +1116,65 @@ function renderDetailTable(rows, re, filterCol) {
         });
         h += '</tr>';
     });
-
     h += '</tbody></table></div>';
+
+    if (totalPages > 1) {
+        h += `<div class="page-controls" style="padding:8px 0">`;
+        h += `<button class="page-btn" onclick="goDetailPage(${detailPage-1})" ${detailPage===1?'disabled':''}>‹ Prev</button>`;
+        for (let p = Math.max(1, detailPage-2); p <= Math.min(totalPages, detailPage+2); p++) {
+            h += `<button class="page-btn${p===detailPage?' active':''}" onclick="goDetailPage(${p})">${p}</button>`;
+        }
+        h += `<button class="page-btn" onclick="goDetailPage(${detailPage+1})" ${detailPage===totalPages?'disabled':''}>Next ›</button>`;
+        h += `<span class="page-info">Page ${detailPage}/${totalPages} · ${rows.length} rows</span>`;
+        h += `</div>`;
+    }
+
     body.innerHTML = h;
+}
+
+function goDetailPage(page) {
+    const filteredRows = _getFilteredDetailRows();
+    const totalPages = Math.ceil(filteredRows.length / DETAIL_PAGE_SIZE);
+    if (page < 1 || page > totalPages) return;
+    detailPage = page;
+
+    const col = document.getElementById('detailCol').value;
+    const rawPattern = document.getElementById('detailSearch').value;
+    let re = null;
+    try { if (rawPattern) re = new RegExp(rawPattern, 'i'); } catch {}
+    _renderDetailPage(filteredRows, re, col);
+}
+
+// ═════════════════════════════════════════════════════
+//  EXPORT UTILITIES (CSV / JSON)
+// ═════════════════════════════════════════════════════
+
+function exportCSV(columns, rows, filename) {
+    if (!columns?.length || !rows?.length) return;
+    const escapeCsv = (val) => {
+        const s = val != null ? String(val) : '';
+        return s.includes(',') || s.includes('"') || s.includes('\n') ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    const header = columns.map(escapeCsv).join(',');
+    const body = rows.map(row => columns.map(c => escapeCsv(row[c])).join(',')).join('\n');
+    const blob = new Blob([header + '\n' + body], { type: 'text/csv;charset=utf-8;' });
+    _downloadBlob(blob, (filename || 'export') + '.csv');
+}
+
+function exportJSON(columns, rows, filename) {
+    if (!rows?.length) return;
+    const blob = new Blob([JSON.stringify(rows, null, 2)], { type: 'application/json;charset=utf-8;' });
+    _downloadBlob(blob, (filename || 'export') + '.json');
+}
+
+function _downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
 }
 
 // ═════════════════════════════════════════════════════
@@ -1015,29 +1203,15 @@ function hlSQL(sql){
 //  TAB SWITCHING
 // ═════════════════════════════════════════════════════
 function switchTab(tab) {
-    const chatTab = document.getElementById('chatTab');
-    const adminTab = document.getElementById('adminTab');
-    const activityTab = document.getElementById('activityTab');
-    const dashboardTab = document.getElementById('dashboardTab');
-    const btnChat = document.getElementById('tabChat');
-    const btnAdmin = document.getElementById('tabAdmin');
-    const btnActivity = document.getElementById('tabActivity');
-    const btnDashboard = document.getElementById('tabDashboard');
+    const tabs = ['chatTab', 'adminTab', 'activityTab', 'dashboardTab', 'savedTab'];
+    const btns = ['tabChat', 'tabAdmin', 'tabActivity', 'tabDashboard', 'tabSaved'];
 
-    // Hide all tabs, deactivate all buttons
-    chatTab.style.display = 'none';
-    adminTab.style.display = 'none';
-    activityTab.style.display = 'none';
-    dashboardTab.style.display = 'none';
-    btnChat.classList.remove('active');
-    btnAdmin.classList.remove('active');
-    btnActivity.classList.remove('active');
-    btnDashboard.classList.remove('active');
+    tabs.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
+    btns.forEach(id => { const el = document.getElementById(id); if (el) el.classList.remove('active'); });
 
     if (tab === 'admin') {
-        adminTab.style.display = '';
-        btnAdmin.classList.add('active');
-        // Show onboard + user management only for db_onboard admins
+        document.getElementById('adminTab').style.display = '';
+        document.getElementById('tabAdmin').classList.add('active');
         const canOnboard = Object.entries(_perms()).some(([, v]) => v.includes('db_onboard'));
         const onboardSec = document.getElementById('adminOnboardSection');
         const userMgmtSec = document.getElementById('adminUserMgmtSection');
@@ -1046,16 +1220,21 @@ function switchTab(tab) {
         populateAdminDbSelector();
         populateReindexDbSelector();
     } else if (tab === 'activity') {
-        activityTab.style.display = '';
-        btnActivity.classList.add('active');
+        document.getElementById('activityTab').style.display = '';
+        document.getElementById('tabActivity').classList.add('active');
         initActivityTab();
     } else if (tab === 'dashboard') {
-        dashboardTab.style.display = '';
-        btnDashboard.classList.add('active');
+        document.getElementById('dashboardTab').style.display = '';
+        document.getElementById('tabDashboard').classList.add('active');
         loadDashboardsList();
+    } else if (tab === 'saved') {
+        document.getElementById('savedTab').style.display = '';
+        document.getElementById('tabSaved').classList.add('active');
+        populateSavedQueryFilters();
+        loadSavedQueries();
     } else {
-        chatTab.style.display = '';
-        btnChat.classList.add('active');
+        document.getElementById('chatTab').style.display = '';
+        document.getElementById('tabChat').classList.add('active');
     }
 }
 
@@ -1709,7 +1888,7 @@ async function loadUserModalStats() {
 
 // ESC key closes modals
 document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') { closeChartModal(); closeDetailModal(); closeUserActivityModal(); closePinModal(); closeCreateDashboardModal(); closeExplainModal(); }
+    if (e.key === 'Escape') { closeChartModal(); closeDetailModal(); closeUserActivityModal(); closePinModal(); closeCreateDashboardModal(); closeExplainModal(); closeSaveQueryModal(); }
 });
 
 // ═════════════════════════════════════════════════════
@@ -1900,10 +2079,12 @@ async function refreshCurrentDashboard() {
                 h += `<div class="px-4 py-6 text-center"><span class="text-xs" style="color:${statusColor}">${esc(pin.error || 'Error refreshing this pin')}</span></div>`;
             }
 
-            // Footer with explore button + prompt
+            // Footer with explore + export buttons
             h += `<div class="px-4 py-2 border-t border-d-border flex items-center gap-2">`;
             if (pin.status === 'success' && pin.rows?.length) {
-                h += `<button onclick="openPinDetailModal(${pin.pin_id})" class="chip shrink-0" style="font-size:10px;padding:3px 8px">🔍 Explore (${pin.row_count} rows)</button>`;
+                h += `<button onclick="openPinDetailModal(${pin.pin_id})" class="chip shrink-0" style="font-size:10px;padding:3px 8px">🔍 Explore</button>`;
+                h += `<button onclick="exportPinCSV(${pin.pin_id})" class="export-btn" style="font-size:10px;padding:3px 8px">⬇ CSV</button>`;
+                h += `<button onclick="exportPinJSON(${pin.pin_id})" class="export-btn" style="font-size:10px;padding:3px 8px">⬇ JSON</button>`;
             }
             h += `<p class="text-[10px] text-d-muted truncate flex-1" title="${escAttr(pin.prompt)}">💬 ${esc(pin.prompt)}</p>
             </div>`;
@@ -1996,6 +2177,20 @@ async function removePin(pinId) {
     } catch (e) {
         alert('Error: ' + e.message);
     }
+}
+
+
+// ─── Export pin data as CSV/JSON ──────────────────────
+function exportPinCSV(pinId) {
+    const pd = dashboardPinData[pinId];
+    if (!pd) { alert('No data available for this pin.'); return; }
+    exportCSV(pd.columns, pd.rows, 'dashboard_pin_' + pinId);
+}
+
+function exportPinJSON(pinId) {
+    const pd = dashboardPinData[pinId];
+    if (!pd) { alert('No data available for this pin.'); return; }
+    exportJSON(pd.columns, pd.rows, 'dashboard_pin_' + pinId);
 }
 
 
@@ -2110,6 +2305,234 @@ async function submitPin() {
         btn.disabled = false; btn.textContent = '📌 Pin It';
     }
 }
+
+// ═════════════════════════════════════════════════════
+//  SAVED QUERIES – Save, List, Run, Delete, Favorite
+// ═════════════════════════════════════════════════════
+
+let saveQueryContext = { prompt: null, sql: null };
+
+function openSaveQueryModal(prompt, sql) {
+    if (!sql) { alert('No SQL to save.'); return; }
+    saveQueryContext = { prompt, sql };
+    document.getElementById('sqName').value = (prompt || '').substring(0, 80);
+    document.getElementById('sqDesc').value = '';
+    document.getElementById('sqFolder').value = '';
+    document.getElementById('sqFavorite').checked = false;
+    document.getElementById('sqError').textContent = '';
+
+    // Load existing folders into datalist
+    _loadFolderHints();
+
+    document.getElementById('saveQueryModal').classList.add('open');
+    setTimeout(() => document.getElementById('sqName').focus(), 100);
+}
+
+function closeSaveQueryModal() {
+    document.getElementById('saveQueryModal').classList.remove('open');
+}
+
+async function _loadFolderHints() {
+    try {
+        const r = await authFetch(`${chatUrl()}/api/saved-queries/folders`);
+        if (!r.ok) return;
+        const folders = await r.json();
+        const dl = document.getElementById('sqFolderList');
+        dl.innerHTML = '';
+        folders.forEach(f => {
+            const o = document.createElement('option');
+            o.value = f;
+            dl.appendChild(o);
+        });
+    } catch (_) {}
+}
+
+async function submitSaveQuery() {
+    const name = document.getElementById('sqName').value.trim();
+    const desc = document.getElementById('sqDesc').value.trim();
+    const folder = document.getElementById('sqFolder').value.trim();
+    const isFav = document.getElementById('sqFavorite').checked;
+    const errEl = document.getElementById('sqError');
+    errEl.textContent = '';
+
+    if (!name) { errEl.textContent = 'Please enter a query name'; return; }
+    if (!saveQueryContext.sql) { errEl.textContent = 'No SQL to save'; return; }
+
+    const btn = document.getElementById('sqSubmitBtn');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+        const r = await authFetch(`${chatUrl()}/api/saved-queries`, {
+            method: 'POST',
+            body: JSON.stringify({
+                connection_id: selectedConnId,
+                name,
+                sql: saveQueryContext.sql,
+                prompt: saveQueryContext.prompt || null,
+                description: desc || null,
+                folder: folder || null,
+                is_favorite: isFav,
+            }),
+        });
+        if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || 'Failed to save'); }
+        closeSaveQueryModal();
+        showToast('⭐ Query saved!');
+    } catch (e) {
+        errEl.textContent = e.message;
+    } finally {
+        btn.disabled = false; btn.textContent = '⭐ Save Query';
+    }
+}
+
+function populateSavedQueryFilters() {
+    const sel = document.getElementById('sqDbFilter');
+    if (!sel) return;
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">All databases</option>';
+    const chatSel = document.getElementById('dbSelector');
+    for (let i = 0; i < chatSel.options.length; i++) {
+        const v = chatSel.options[i].value;
+        if (!v) continue;
+        const o = document.createElement('option');
+        o.value = v;
+        o.textContent = chatSel.options[i].textContent;
+        sel.appendChild(o);
+    }
+    if (prev) sel.value = prev;
+
+    // Load folder filter
+    _loadFolderFilter();
+}
+
+async function _loadFolderFilter() {
+    try {
+        const r = await authFetch(`${chatUrl()}/api/saved-queries/folders`);
+        if (!r.ok) return;
+        const folders = await r.json();
+        const sel = document.getElementById('sqFolderFilter');
+        const prev = sel.value;
+        sel.innerHTML = '<option value="">All folders</option>';
+        folders.forEach(f => {
+            const o = document.createElement('option');
+            o.value = f; o.textContent = f;
+            sel.appendChild(o);
+        });
+        if (prev) sel.value = prev;
+    } catch (_) {}
+}
+
+async function loadSavedQueries() {
+    const grid = document.getElementById('savedQueryGrid');
+    if (!grid) return;
+    grid.innerHTML = '<p class="text-sm text-d-muted">Loading saved queries…</p>';
+
+    const connId = document.getElementById('sqDbFilter')?.value || '';
+    const folder = document.getElementById('sqFolderFilter')?.value || '';
+    const favOnly = document.getElementById('sqFavOnly')?.checked || false;
+
+    const params = new URLSearchParams();
+    if (connId) params.set('connection_id', connId);
+    if (folder) params.set('folder', folder);
+    if (favOnly) params.set('favorites_only', 'true');
+
+    try {
+        const r = await authFetch(`${chatUrl()}/api/saved-queries?${params}`);
+        if (!r.ok) throw new Error('Failed to load saved queries');
+        const queries = await r.json();
+
+        if (!queries.length) {
+            grid.innerHTML = `
+                <div class="col-span-full text-center py-16">
+                    <p class="text-4xl mb-3">⭐</p>
+                    <p class="text-d-muted text-sm mb-2">No saved queries yet</p>
+                    <p class="text-d-muted text-xs mb-4">Chat with your database and click <strong class="text-d-green">⭐ Save</strong> on any result to bookmark it.</p>
+                </div>`;
+            return;
+        }
+
+        // Get DB names for display
+        const chatSel = document.getElementById('dbSelector');
+        const dbNames = {};
+        for (let i = 0; i < chatSel.options.length; i++) {
+            dbNames[chatSel.options[i].value] = chatSel.options[i].textContent;
+        }
+
+        let h = '';
+        queries.forEach(sq => {
+            const ago = relativeTime(new Date(sq.updated_at));
+            const dbName = dbNames[sq.connection_id] || `DB #${sq.connection_id}`;
+            h += `<div class="sq-card" onclick="runSavedQuery(${sq.id}, '${escAttr(sq.name)}')">
+                <div class="flex items-center gap-2 mb-2">
+                    <span class="sq-fav${sq.is_favorite ? ' on' : ''}" onclick="event.stopPropagation();toggleSqFavorite(${sq.id})" title="Toggle favorite">★</span>
+                    <h3 class="text-sm font-semibold text-white truncate flex-1">${esc(sq.name)}</h3>
+                    <button onclick="event.stopPropagation();deleteSavedQuery(${sq.id})" class="text-d-muted hover:text-red-400 text-xs" title="Delete">✕</button>
+                </div>
+                ${sq.description ? `<p class="text-xs text-d-muted mb-2 truncate">${esc(sq.description)}</p>` : ''}
+                <div class="text-[11px] text-d-muted mb-2 font-mono truncate" style="color:#a5b4fc">${esc(sq.sql.substring(0, 120))}</div>
+                <div class="flex items-center gap-2 flex-wrap">
+                    <span class="text-[10px] text-d-muted">${esc(dbName)}</span>
+                    ${sq.folder ? `<span class="sq-folder-badge">${esc(sq.folder)}</span>` : ''}
+                    <span class="text-[10px] text-d-muted ml-auto">${sq.run_count} runs · ${ago}</span>
+                </div>
+            </div>`;
+        });
+        grid.innerHTML = h;
+    } catch (e) {
+        grid.innerHTML = `<p class="text-sm text-red-400">${esc(e.message)}</p>`;
+    }
+}
+
+async function runSavedQuery(queryId, queryName) {
+    switchTab('chat');
+
+    addUserMsg(`▶ Re-running: ${queryName}`);
+    setTyping(true);
+
+    try {
+        const r = await authFetch(`${chatUrl()}/api/saved-queries/${queryId}/run?page=1&page_size=200`, { method: 'POST' });
+        const result = await r.json();
+        setTyping(false);
+
+        if (!r.ok || !result.success) {
+            addBotError(result.error || result.detail || 'Failed to run saved query');
+            return;
+        }
+
+        const data = {
+            status: 'success',
+            answer: `Saved query "${queryName}" returned ${result.total_count ?? result.row_count} rows.`,
+            sql: null,
+            rows: result.rows,
+            columns: result.columns,
+            row_count: result.total_count ?? result.row_count,
+            execution_time_ms: result.execution_time_ms,
+            selected_tables: [],
+        };
+        await addBotReply(queryName, data);
+    } catch (e) {
+        setTyping(false);
+        addBotError('Failed to run saved query: ' + e.message);
+    }
+}
+
+async function toggleSqFavorite(queryId) {
+    try {
+        await authFetch(`${chatUrl()}/api/saved-queries/${queryId}/toggle-favorite`, { method: 'POST' });
+        loadSavedQueries();
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+async function deleteSavedQuery(queryId) {
+    if (!confirm('Delete this saved query?')) return;
+    try {
+        await authFetch(`${chatUrl()}/api/saved-queries/${queryId}`, { method: 'DELETE' });
+        loadSavedQueries();
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
 
 // ═════════════════════════════════════════════════════
 //  TOAST NOTIFICATION

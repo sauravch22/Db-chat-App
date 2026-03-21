@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 import logging
 
 from app.config import Settings
-from app.api.routes import chat, admin, health, auth, activity, dashboard
+from app.api.routes import chat, admin, health, auth, activity, dashboard, saved_queries
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -57,6 +57,38 @@ async def lifespan(app: FastAPI):
                 conn.commit()
                 logger.info("Migrated: added thread_title column to chat_history")
 
+    # Migration: add v2 table summary columns if missing
+    with engine.connect() as conn:
+        insp = sa_inspect(engine)
+        if "tables" in insp.get_table_names():
+            cols = [c["name"] for c in insp.get_columns("tables")]
+            changed = False
+            if "summary" not in cols:
+                conn.execute(text("ALTER TABLE tables ADD COLUMN summary TEXT"))
+                changed = True
+                logger.info("Migrated: added summary column to tables")
+            if "summary_generated_at" not in cols:
+                conn.execute(text("ALTER TABLE tables ADD COLUMN summary_generated_at TIMESTAMP"))
+                changed = True
+                logger.info("Migrated: added summary_generated_at column to tables")
+            if "summary_human_override" not in cols:
+                conn.execute(text("ALTER TABLE tables ADD COLUMN summary_human_override BOOLEAN DEFAULT FALSE"))
+                changed = True
+                logger.info("Migrated: added summary_human_override column to tables")
+            if changed:
+                conn.commit()
+
+    # Migration: add is_primary_key column to columns table if missing
+    with engine.connect() as conn:
+        insp = sa_inspect(engine)
+        if "columns" in insp.get_table_names():
+            cols = [c["name"] for c in insp.get_columns("columns")]
+            if "is_primary_key" not in cols:
+                conn.execute(text("ALTER TABLE columns ADD COLUMN is_primary_key BOOLEAN DEFAULT FALSE"))
+                conn.execute(text("UPDATE columns SET is_primary_key = FALSE WHERE is_primary_key IS NULL"))
+                conn.commit()
+                logger.info("Migrated: added is_primary_key column to columns")
+
     # Seed default admin user with global + per-DB permissions
     from app.database import SessionLocal
     from app.services.auth_service import (
@@ -101,6 +133,7 @@ app.include_router(chat.router, tags=["Chat"])
 app.include_router(admin.router, tags=["Admin"])
 app.include_router(activity.router, tags=["Activity"])
 app.include_router(dashboard.router, tags=["Dashboard"])
+app.include_router(saved_queries.router, tags=["Saved Queries"])
 
 
 @app.get("/")

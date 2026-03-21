@@ -564,7 +564,7 @@ class ChatService:
     async def _handle_catalog_query(self, connection: Connection, prompt: str) -> Dict[str, Any]:
         """Handle catalog/introspection queries by querying information_schema and pg_catalog on the target DB."""
         try:
-            db_url = f"postgresql://{connection.username}:{connection.password}@{connection.host}:{connection.port}/{connection.database}?sslmode=require"
+            db_url = f"postgresql://{connection.username}:{connection.password}@{connection.host}:{connection.port}/{connection.database}"
             engine = create_engine(db_url, poolclass=NullPool, connect_args={"connect_timeout": 10})
 
             lower = prompt.lower()
@@ -851,8 +851,8 @@ class ChatService:
     ) -> Dict[str, Any]:
         exec_start = time.time()
         try:
-            if connection.database_type.lower() == "postgres":
-                conn_string = f"postgresql://{connection.username}:{connection.password}@{connection.host}:{connection.port}/{connection.database}?sslmode=require"
+            if connection.database_type.lower() in ("postgres", "postgresql"):
+                conn_string = f"postgresql://{connection.username}:{connection.password}@{connection.host}:{connection.port}/{connection.database}"
             elif connection.database_type.lower() == "mysql":
                 conn_string = f"mysql+pymysql://{connection.username}:{connection.password}@{connection.host}:{connection.port}/{connection.database}"
             else:
@@ -861,7 +861,7 @@ class ChatService:
             engine = create_engine(
                 conn_string,
                 poolclass=NullPool,
-                connect_args={"connect_timeout": timeout} if connection.database_type.lower() == "postgres" else {}
+                connect_args={"connect_timeout": timeout} if connection.database_type.lower() in ("postgres", "postgresql") else {}
             )
 
             logger.info(f"Executing on {connection.database_type} database")
@@ -943,7 +943,7 @@ class ChatService:
                 }
             
             # Build connection string
-            if connection.database_type.lower() == "postgres":
+            if connection.database_type.lower() in ("postgres", "postgresql"):
                 conn_string = f"postgresql://{connection.username}:{connection.password}@{connection.host}:{connection.port}/{connection.database}"
             elif connection.database_type.lower() == "mysql":
                 conn_string = f"mysql+pymysql://{connection.username}:{connection.password}@{connection.host}:{connection.port}/{connection.database}"
@@ -959,7 +959,7 @@ class ChatService:
             engine = create_engine(
                 conn_string,
                 poolclass=NullPool,
-                connect_args={"connect_timeout": timeout} if connection.database_type.lower() == "postgres" else {}
+                connect_args={"connect_timeout": timeout} if connection.database_type.lower() in ("postgres", "postgresql") else {}
             )
             
             logger.info(f"Executing query on {connection.database_type} database")

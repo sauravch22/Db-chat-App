@@ -131,7 +131,7 @@ class IndexingService:
                 conn_string = SchemaExtractor.build_connection_string(
                     db_type, host, port, username, password, database_name
                 )
-                connect_args = {"connect_timeout": 10} if db_type.lower() == "postgres" else {"timeout": 10}
+                connect_args = {"connect_timeout": 10} if db_type.lower() in ("postgres", "postgresql") else {"timeout": 10}
                 data_engine = create_engine(
                     conn_string,
                     poolclass=NullPool,

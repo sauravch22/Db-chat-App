@@ -326,3 +326,32 @@ class DashboardPin(Base):
 
     dashboard = relationship("Dashboard", back_populates="pins")
     connection = relationship("Connection")
+
+
+# ============================================================================
+# SAVED QUERIES  –  user-bookmarked queries for quick re-run
+# ============================================================================
+
+class SavedQuery(Base):
+    """
+    A bookmarked query that a user wants to keep for quick re-use.
+    Stores the original prompt, generated SQL, and the connection it targets.
+    """
+    __tablename__ = "saved_queries"
+
+    id = SA_Column(Integer, primary_key=True)
+    user_id = SA_Column(Integer, SA_ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    connection_id = SA_Column(Integer, SA_ForeignKey("connections.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = SA_Column(String(255), nullable=False)
+    prompt = SA_Column(Text, nullable=True)
+    sql = SA_Column(Text, nullable=False)
+    description = SA_Column(Text, nullable=True)
+    folder = SA_Column(String(100), nullable=True)
+    is_favorite = SA_Column(Boolean, default=False)
+    run_count = SA_Column(Integer, default=0)
+    last_run_at = SA_Column(DateTime, nullable=True)
+    created_at = SA_Column(DateTime, default=datetime.utcnow)
+    updated_at = SA_Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User", foreign_keys=[user_id])
+    connection = relationship("Connection", foreign_keys=[connection_id])

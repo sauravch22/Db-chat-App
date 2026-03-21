@@ -23,9 +23,9 @@ class SchemaExtractor:
     ) -> str:
         """Build database connection string"""
         
-        if db_type.lower() == "postgres":
+        if db_type.lower() in ("postgres", "postgresql"):
             # Use SSL mode for Postgres (required for cloud services like Neon)
-            return f"postgresql://{username}:{password}@{host}:{port}/{database}?sslmode=require"
+            return f"postgresql://{username}:{password}@{host}:{port}/{database}"
         elif db_type.lower() == "mysql":
             return f"mysql+pymysql://{username}:{password}@{host}:{port}/{database}"
         elif db_type.lower() == "sqlserver":
@@ -71,7 +71,7 @@ class SchemaExtractor:
             
             # Create engine with appropriate timeout based on DB type
             connect_args = {}
-            if db_type.lower() == "postgres":
+            if db_type.lower() in ("postgres", "postgresql"):
                 connect_args = {"connect_timeout": timeout}
             else:
                 connect_args = {"timeout": timeout}
