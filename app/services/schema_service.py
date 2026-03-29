@@ -12,6 +12,34 @@ logger = logging.getLogger(__name__)
 class SchemaExtractor:
     """Extract schema from user databases"""
     
+    SUPPORTED_DB_TYPES = [
+        {"id": "postgres", "name": "PostgreSQL", "aliases": ["postgresql"],
+         "needs_host": True, "default_port": 5432},
+        {"id": "mysql", "name": "MySQL", "aliases": [],
+         "needs_host": True, "default_port": 3306},
+        {"id": "sqlserver", "name": "SQL Server", "aliases": ["mssql"],
+         "needs_host": True, "default_port": 1433},
+        {"id": "sqlite", "name": "SQLite", "aliases": [],
+         "needs_host": False, "default_port": 0},
+        {"id": "duckdb", "name": "DuckDB", "aliases": [],
+         "needs_host": False, "default_port": 0},
+        {"id": "snowflake", "name": "Snowflake", "aliases": [],
+         "needs_host": True, "default_port": 443},
+        {"id": "bigquery", "name": "BigQuery", "aliases": ["bq"],
+         "needs_host": False, "default_port": 0},
+        {"id": "redshift", "name": "Redshift", "aliases": [],
+         "needs_host": True, "default_port": 5439},
+        # NoSQL (schema extraction handled by nosql_service)
+        {"id": "mongodb", "name": "MongoDB", "aliases": ["mongo"],
+         "needs_host": True, "default_port": 27017},
+        {"id": "redis", "name": "Redis", "aliases": [],
+         "needs_host": True, "default_port": 6379},
+        {"id": "elasticsearch", "name": "Elasticsearch", "aliases": ["elastic", "es"],
+         "needs_host": True, "default_port": 9200},
+        {"id": "neo4j", "name": "Neo4j", "aliases": [],
+         "needs_host": True, "default_port": 7687},
+    ]
+
     @staticmethod
     def build_connection_string(
         db_type: str,
@@ -22,14 +50,23 @@ class SchemaExtractor:
         database: str
     ) -> str:
         """Build database connection string"""
-        
-        if db_type.lower() in ("postgres", "postgresql"):
-            # Use SSL mode for Postgres (required for cloud services like Neon)
+        dt = db_type.lower()
+        if dt in ("postgres", "postgresql"):
             return f"postgresql://{username}:{password}@{host}:{port}/{database}"
-        elif db_type.lower() == "mysql":
+        elif dt == "mysql":
             return f"mysql+pymysql://{username}:{password}@{host}:{port}/{database}"
-        elif db_type.lower() == "sqlserver":
+        elif dt in ("sqlserver", "mssql"):
             return f"mssql+pyodbc://{username}:{password}@{host}:{port}/{database}?driver=ODBC+Driver+17+for+SQL+Server"
+        elif dt == "sqlite":
+            return f"sqlite:///{database}"
+        elif dt == "duckdb":
+            return f"duckdb:///{database}"
+        elif dt == "snowflake":
+            return f"snowflake://{username}:{password}@{host}/{database}"
+        elif dt in ("bigquery", "bq"):
+            return f"bigquery://{database}"
+        elif dt == "redshift":
+            return f"postgresql://{username}:{password}@{host}:{port}/{database}"
         else:
             raise ValueError(f"Unsupported database type: {db_type}")
     
@@ -69,12 +106,18 @@ class SchemaExtractor:
             logger.info(f"Connecting to {db_type} at {host}:{port}/{database}")
             logger.info(f"Connection string: {conn_string.split('@')[0]}@[hidden]")
             
-            # Create engine with appropriate timeout based on DB type
+            dt = db_type.lower()
             connect_args = {}
-            if db_type.lower() in ("postgres", "postgresql"):
+            if dt in ("postgres", "postgresql"):
                 connect_args = {"connect_timeout": timeout}
-            else:
+            elif dt == "sqlite":
                 connect_args = {"timeout": timeout}
+            elif dt == "duckdb":
+                connect_args = {}
+            elif dt in ("sqlserver", "mssql"):
+                connect_args = {"timeout": timeout}
+            else:
+                connect_args = {"connect_timeout": timeout}
             
             logger.info(f"Creating engine with connect_args: {connect_args}")
             engine = create_engine(

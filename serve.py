@@ -6,7 +6,15 @@ from contextlib import asynccontextmanager
 import logging
 
 from app.config import Settings
-from app.api.routes import chat, admin, health, auth, activity, dashboard, saved_queries
+from app.api.routes import (chat, admin, health, auth, activity, dashboard,
+                            saved_queries, schema_explorer, query_validation,
+                            suggestions, annotations, scheduled, writeback,
+                            workbench, lineage, intelligence,
+                            llm_settings, summarize, templates, cross_db,
+                            nosql, connection_test, file_upload, erd,
+                            training, optimizer, data_quality,
+                            api_generator, migration, pipeline,
+                            collab, embed)
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -89,6 +97,22 @@ async def lifespan(app: FastAPI):
                 conn.commit()
                 logger.info("Migrated: added is_primary_key column to columns")
 
+    # Migration: add tags + is_shared to chat_history if missing
+    with engine.connect() as conn:
+        insp = sa_inspect(engine)
+        if "chat_history" in insp.get_table_names():
+            cols = [c["name"] for c in insp.get_columns("chat_history")]
+            changed = False
+            if "tags" not in cols:
+                conn.execute(text("ALTER TABLE chat_history ADD COLUMN tags TEXT"))
+                changed = True
+            if "is_shared" not in cols:
+                conn.execute(text("ALTER TABLE chat_history ADD COLUMN is_shared BOOLEAN DEFAULT FALSE"))
+                changed = True
+            if changed:
+                conn.commit()
+                logger.info("Migrated: added tags/is_shared columns to chat_history")
+
     # Seed default admin user with global + per-DB permissions
     from app.database import SessionLocal
     from app.services.auth_service import (
@@ -134,6 +158,31 @@ app.include_router(admin.router, tags=["Admin"])
 app.include_router(activity.router, tags=["Activity"])
 app.include_router(dashboard.router, tags=["Dashboard"])
 app.include_router(saved_queries.router, tags=["Saved Queries"])
+app.include_router(schema_explorer.router, tags=["Schema Explorer"])
+app.include_router(query_validation.router, tags=["Query Validation"])
+app.include_router(suggestions.router, tags=["Suggestions"])
+app.include_router(annotations.router, tags=["Annotations"])
+app.include_router(scheduled.router, tags=["Scheduled Queries"])
+app.include_router(writeback.router, tags=["Write-Back"])
+app.include_router(workbench.router, tags=["Workbench"])
+app.include_router(lineage.router, tags=["Data Lineage"])
+app.include_router(intelligence.router, tags=["Connection Intelligence"])
+app.include_router(llm_settings.router, tags=["LLM Settings"])
+app.include_router(summarize.router, tags=["Data Summarization"])
+app.include_router(templates.router, tags=["Query Templates"])
+app.include_router(cross_db.router, tags=["Cross-Database"])
+app.include_router(nosql.router, tags=["NoSQL"])
+app.include_router(connection_test.router, tags=["Connection Test"])
+app.include_router(file_upload.router, tags=["File Upload"])
+app.include_router(erd.router, tags=["ERD Diagrams"])
+app.include_router(training.router, tags=["Training / RAG"])
+app.include_router(optimizer.router, tags=["Query Optimizer"])
+app.include_router(data_quality.router, tags=["Data Quality"])
+app.include_router(api_generator.router, tags=["API Generator"])
+app.include_router(migration.router, tags=["Schema Migration"])
+app.include_router(pipeline.router, tags=["Data Pipeline"])
+app.include_router(collab.router, tags=["Collaboration"])
+app.include_router(embed.router, tags=["Embeddable Widget"])
 
 
 @app.get("/")

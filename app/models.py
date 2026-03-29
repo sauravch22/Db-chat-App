@@ -273,6 +273,8 @@ class ChatHistory(Base):
     error_message = SA_Column(Text, nullable=True)
     thread_id = SA_Column(String(36), nullable=True, index=True)    # groups messages into a thread
     thread_title = SA_Column(String(255), nullable=True)             # auto-generated from first prompt
+    tags = SA_Column(Text, nullable=True)  # JSON array of tag strings
+    is_shared = SA_Column(Boolean, default=False)
     created_at = SA_Column(DateTime, default=datetime.utcnow, index=True)
 
     user = relationship("User", foreign_keys=[user_id])
@@ -353,5 +355,153 @@ class SavedQuery(Base):
     created_at = SA_Column(DateTime, default=datetime.utcnow)
     updated_at = SA_Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+    annotations = relationship("QueryAnnotation", back_populates="saved_query", cascade="all, delete")
     user = relationship("User", foreign_keys=[user_id])
     connection = relationship("Connection", foreign_keys=[connection_id])
+
+
+# ============================================================================
+# QUERY ANNOTATIONS  –  notes/tags on results  (Feature 5)
+# ============================================================================
+
+class QueryAnnotation(Base):
+    __tablename__ = "query_annotations"
+
+    id = SA_Column(Integer, primary_key=True)
+    user_id = SA_Column(Integer, SA_ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    connection_id = SA_Column(Integer, SA_ForeignKey("connections.id", ondelete="CASCADE"), nullable=False)
+    chat_history_id = SA_Column(Integer, SA_ForeignKey("chat_history.id", ondelete="CASCADE"), nullable=True)
+    saved_query_id = SA_Column(Integer, SA_ForeignKey("saved_queries.id", ondelete="CASCADE"), nullable=True)
+    note = SA_Column(Text, nullable=False)
+    tags = SA_Column(Text, nullable=True)
+    is_shared = SA_Column(Boolean, default=False)
+    created_at = SA_Column(DateTime, default=datetime.utcnow)
+    updated_at = SA_Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User", foreign_keys=[user_id])
+    connection = relationship("Connection", foreign_keys=[connection_id])
+    saved_query = relationship("SavedQuery", back_populates="annotations")
+
+
+# ============================================================================
+# SCHEDULED QUERIES  –  recurring query execution  (Feature 6)
+# ============================================================================
+
+class ScheduledQuery(Base):
+    __tablename__ = "scheduled_queries"
+
+    id = SA_Column(Integer, primary_key=True)
+    user_id = SA_Column(Integer, SA_ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    saved_query_id = SA_Column(Integer, SA_ForeignKey("saved_queries.id", ondelete="CASCADE"), nullable=False)
+    connection_id = SA_Column(Integer, SA_ForeignKey("connections.id", ondelete="CASCADE"), nullable=False)
+    name = SA_Column(String(255), nullable=False)
+    cron_expression = SA_Column(String(100), nullable=False)
+    is_active = SA_Column(Boolean, default=True)
+    alert_condition = SA_Column(Text, nullable=True)
+    alert_email = SA_Column(String(255), nullable=True)
+    last_run_at = SA_Column(DateTime, nullable=True)
+    last_run_status = SA_Column(String(20), nullable=True)
+    last_run_result = SA_Column(Text, nullable=True)
+    last_run_row_count = SA_Column(Integer, nullable=True)
+    next_run_at = SA_Column(DateTime, nullable=True)
+    run_count = SA_Column(Integer, default=0)
+    created_at = SA_Column(DateTime, default=datetime.utcnow)
+    updated_at = SA_Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User", foreign_keys=[user_id])
+    saved_query = relationship("SavedQuery")
+    connection = relationship("Connection", foreign_keys=[connection_id])
+
+
+# ============================================================================
+# WRITE-BACK REQUESTS  –  controlled data modifications  (Feature 7)
+# ============================================================================
+
+class WriteBackRequest(Base):
+    __tablename__ = "writeback_requests"
+
+    id = SA_Column(Integer, primary_key=True)
+    user_id = SA_Column(Integer, SA_ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    connection_id = SA_Column(Integer, SA_ForeignKey("connections.id", ondelete="CASCADE"), nullable=False)
+    sql = SA_Column(Text, nullable=False)
+    operation_type = SA_Column(String(20), nullable=False)
+    target_table = SA_Column(String(255), nullable=False)
+    affected_rows_estimate = SA_Column(Integer, nullable=True)
+    status = SA_Column(String(20), nullable=False, default="pending")
+    approved_by = SA_Column(Integer, SA_ForeignKey("users.id"), nullable=True)
+    approved_at = SA_Column(DateTime, nullable=True)
+    executed_at = SA_Column(DateTime, nullable=True)
+    execution_result = SA_Column(Text, nullable=True)
+    rows_affected = SA_Column(Integer, nullable=True)
+    rollback_sql = SA_Column(Text, nullable=True)
+    reason = SA_Column(Text, nullable=True)
+    created_at = SA_Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", foreign_keys=[user_id])
+    approver = relationship("User", foreign_keys=[approved_by])
+    connection = relationship("Connection", foreign_keys=[connection_id])
+
+
+# ============================================================================
+# QUERY TEMPLATES  –  pre-built BI query patterns  (Sprint 4)
+# ============================================================================
+
+class QueryTemplate(Base):
+    """A reusable query template with placeholder variables."""
+    __tablename__ = "query_templates"
+
+    id = SA_Column(Integer, primary_key=True)
+    name = SA_Column(String(255), nullable=False)
+    description = SA_Column(Text, nullable=True)
+    category = SA_Column(String(100), nullable=False, index=True)
+    db_type = SA_Column(String(50), nullable=True)
+    sql_template = SA_Column(Text, nullable=False)
+    variables = SA_Column(Text, nullable=True)  # JSON: [{"name":"table","label":"Table name","default":"orders"}]
+    is_builtin = SA_Column(Boolean, default=True)
+    created_by = SA_Column(Integer, SA_ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    use_count = SA_Column(Integer, default=0)
+    created_at = SA_Column(DateTime, default=datetime.utcnow)
+    updated_at = SA_Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# ============================================================================
+# TRAINING PAIRS  –  RAG / few-shot query examples
+# ============================================================================
+
+
+class TrainingPair(Base):
+    """Stored question ↔ query pairs for retrieval-augmented generation."""
+    __tablename__ = "training_pairs"
+
+    id = SA_Column(Integer, primary_key=True)
+    user_id = SA_Column(Integer, SA_ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    connection_id = SA_Column(Integer, SA_ForeignKey("connections.id", ondelete="CASCADE"), nullable=False, index=True)
+    question = SA_Column(Text, nullable=False)
+    query = SA_Column(Text, nullable=False)
+    query_type = SA_Column(String(50), nullable=False, default="sql")
+    is_verified = SA_Column(Boolean, default=False)
+    upvotes = SA_Column(Integer, default=0)
+    created_at = SA_Column(DateTime, default=datetime.utcnow)
+
+
+# ============================================================================
+# GENERATED API ENDPOINTS  –  saved query as REST slug
+# ============================================================================
+
+
+class GeneratedEndpoint(Base):
+    """User-defined public API backed by a saved SELECT query."""
+    __tablename__ = "generated_endpoints"
+
+    id = SA_Column(Integer, primary_key=True)
+    user_id = SA_Column(Integer, SA_ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    saved_query_id = SA_Column(Integer, SA_ForeignKey("saved_queries.id", ondelete="CASCADE"), nullable=False, index=True)
+    connection_id = SA_Column(Integer, SA_ForeignKey("connections.id", ondelete="CASCADE"), nullable=False, index=True)
+    path_slug = SA_Column(String(255), nullable=False, unique=True, index=True)
+    method = SA_Column(String(10), nullable=False, default="GET")
+    api_key = SA_Column(String(64), nullable=False, index=True)
+    description = SA_Column(Text, nullable=True)
+    rate_limit = SA_Column(Integer, default=100)
+    is_active = SA_Column(Boolean, default=True)
+    call_count = SA_Column(Integer, default=0)
+    created_at = SA_Column(DateTime, default=datetime.utcnow)

@@ -1,10 +1,11 @@
-"""LLM Service — uses remote OpenAI-compatible API for generation,
+"""LLM Service — uses pluggable LLM provider for generation,
 local Ollama for embeddings only."""
 
 import httpx
 import json
 import logging
 from app.config import Settings
+from app.services.llm_provider import get_provider
 
 logger = logging.getLogger(__name__)
 
@@ -12,18 +13,87 @@ settings = Settings()
 
 
 class OllamaService:
-    """Service for interacting with remote LLM (chat completions) and local Ollama (embeddings)"""
+    """Service for interacting with LLM (chat completions) and local Ollama (embeddings)"""
     
     def __init__(self):
-        # Remote LLM (Qwen3-Coder-Next via ngrok)
-        self.llm_api_url = settings.LLM_API_URL
-        self.llm_model = settings.LLM_MODEL_NAME
-        self.llm_timeout = settings.LLM_TIMEOUT_SEC
         self.llm_max_tokens = settings.LLM_MAX_TOKENS
         # Local Ollama (embeddings only)
         self.base_url = settings.OLLAMA_URL
         self.embedding_model = settings.OLLAMA_EMBEDDING_MODEL
     
+    def _get_dialect_rules(self, dialect: str) -> dict:
+        """Return dialect-specific naming and syntax rules."""
+        d = dialect.lower()
+        if d in ("postgres", "postgresql"):
+            return {"name": "PostgreSQL",
+                    "syntax_rules": "10. Use standard PostgreSQL syntax — double quotes for identifiers if needed, NOT backticks"}
+        elif d == "mysql":
+            return {"name": "MySQL",
+                    "syntax_rules": "10. Use standard MySQL syntax — backticks for identifiers, LIMIT instead of FETCH, use IFNULL not COALESCE for two-arg null checks"}
+        elif d == "sqlite":
+            return {"name": "SQLite",
+                    "syntax_rules": "10. Use SQLite syntax — double quotes for identifiers, no FULL OUTER JOIN, use COALESCE, strftime() for dates, no ILIKE (use LIKE with COLLATE NOCASE)"}
+        elif d == "duckdb":
+            return {"name": "DuckDB",
+                    "syntax_rules": "10. Use DuckDB SQL syntax — similar to PostgreSQL but supports list_agg, struct types, and read_csv_auto"}
+        elif d in ("sqlserver", "mssql"):
+            return {"name": "SQL Server (T-SQL)",
+                    "syntax_rules": "10. Use T-SQL syntax — square brackets [table].[col] for identifiers, TOP N instead of LIMIT, ISNULL instead of COALESCE for two-arg, GETDATE() for current time"}
+        else:
+            return {"name": "SQL",
+                    "syntax_rules": "10. Use standard ANSI SQL syntax"}
+
+    async def generate_nosql_query(self, user_prompt: str, db_type: str,
+                                     schema_context: str) -> dict:
+        """Generate a NoSQL query from natural language.
+
+        Returns dict with keys depending on db_type:
+          mongodb: {collection, pipeline} or {collection, filter}
+          redis: {command}
+          elasticsearch: {index, body}
+          neo4j: {cypher}
+        """
+        type_prompts = {
+            "mongodb": """You are a MongoDB expert. Convert the user question into a MongoDB query.
+Output ONLY valid JSON with keys:
+- "collection": the collection name
+- "pipeline": an aggregation pipeline array (preferred for complex queries)
+OR
+- "collection": the collection name
+- "filter": a find filter document
+- "projection": optional projection
+- "limit": optional limit (default 100)
+Use the schema provided to pick correct collection and field names.""",
+            "redis": """You are a Redis expert. Convert the user question into a Redis command.
+Output ONLY the Redis command as a single string (e.g., "KEYS *", "HGETALL user:1", "LRANGE mylist 0 -1").
+Only read commands are allowed — no SET, DEL, FLUSHDB, etc.""",
+            "elasticsearch": """You are an Elasticsearch expert. Convert the user question into an ES query.
+Output ONLY valid JSON with keys:
+- "index": the index name
+- "body": the query body (use match, bool, terms, aggs as needed)
+Use the schema provided to pick correct index and field names.""",
+            "neo4j": """You are a Neo4j Cypher expert. Convert the user question into a Cypher query.
+Output ONLY the Cypher query — no explanation.
+Only read queries (MATCH ... RETURN) — no CREATE, DELETE, SET, MERGE.""",
+        }
+        system = type_prompts.get(db_type.lower(), type_prompts["mongodb"])
+        prompt = f"Schema:\n{schema_context}\n\nQuestion: {user_prompt}\n\nQuery:"
+
+        raw = await self._call_chat_completions(system, prompt, max_tokens=512)
+        raw = raw.replace("```json", "").replace("```", "").strip()
+
+        if db_type.lower() in ("mongodb", "mongo", "elasticsearch", "elastic", "es"):
+            import re as _re
+            json_match = _re.search(r'\{.*\}', raw, _re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group(0))
+            return {"error": "Could not parse query", "raw": raw}
+        elif db_type.lower() == "redis":
+            return {"command": raw.strip().strip('"').strip("'")}
+        elif db_type.lower() == "neo4j":
+            return {"cypher": raw.strip()}
+        return {"raw": raw}
+
     def _clean_sql_output(self, sql: str) -> str:
         """Clean raw LLM output into valid SQL, preserving WITH/CTE clauses."""
         # Strip markdown code fences
@@ -55,71 +125,34 @@ class OllamaService:
         return sql
 
     async def _call_chat_completions(self, system: str, user: str, temperature: float = 0.0, max_tokens: int = None) -> str:
-        """Call the remote OpenAI-compatible chat completions API."""
-        payload = {
-            "model": self.llm_model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "temperature": temperature,
-            "max_tokens": max_tokens or self.llm_max_tokens,
-        }
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                self.llm_api_url,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-                timeout=self.llm_timeout,
-            )
-        if response.status_code != 200:
-            logger.error(f"LLM API error (status {response.status_code}): {response.text[:300]}")
-            raise Exception(f"LLM API returned status code {response.status_code}")
-        data = response.json()
-        content = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-        usage = data.get("usage", {})
-        logger.debug(f"LLM tokens: prompt={usage.get('prompt_tokens','?')}, completion={usage.get('completion_tokens','?')}")
-        return content
+        """Call LLM via the pluggable provider."""
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        provider = get_provider()
+        return await provider.chat(messages, temperature, max_tokens or self.llm_max_tokens)
 
     async def _call_chat_with_messages(self, messages: list, temperature: float = 0.0, max_tokens: int = None) -> str:
-        """Call the remote OpenAI-compatible chat completions API with a full messages array (for thread context)."""
-        payload = {
-            "model": self.llm_model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens or self.llm_max_tokens,
-        }
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                self.llm_api_url,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-                timeout=self.llm_timeout,
-            )
-        if response.status_code != 200:
-            logger.error(f"LLM API error (status {response.status_code}): {response.text[:300]}")
-            raise Exception(f"LLM API returned status code {response.status_code}")
-        data = response.json()
-        content = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-        usage = data.get("usage", {})
-        logger.debug(f"LLM tokens (thread): prompt={usage.get('prompt_tokens','?')}, completion={usage.get('completion_tokens','?')}")
-        return content
+        """Call LLM with a full messages array (for thread context)."""
+        provider = get_provider()
+        return await provider.chat(messages, temperature, max_tokens or self.llm_max_tokens)
 
     async def generate_sql(
         self,
         user_prompt: str,
         schema_context: str,
         sample_info: str,
-        thread_history: list = None
+        thread_history: list = None,
+        db_dialect: str = "postgresql"
     ) -> str:
         """Generate SQL query from natural language.
         
         Args:
-            thread_history: Optional list of prior thread exchanges:
-                           [{"prompt": "...", "sql": "..."}, ...]
+            thread_history: Optional list of prior thread exchanges
+            db_dialect: Database dialect (postgresql, mysql, sqlite, duckdb, sqlserver)
         """
         
-        # Extract exact table names from the schema context to enforce as hard constraints
         exact_tables = []
         for line in schema_context.splitlines():
             stripped = line.strip()
@@ -129,7 +162,9 @@ class OllamaService:
                 exact_tables.append(stripped.split("=== TABLE:", 1)[1].strip("= "))
         table_list_str = ", ".join(exact_tables) if exact_tables else "(see schema)"
 
-        system_prompt = f"""You are a PostgreSQL SQL expert. Your ONLY job is to output a single raw SQL SELECT query.
+        dialect_rules = self._get_dialect_rules(db_dialect)
+
+        system_prompt = f"""You are a {dialect_rules['name']} SQL expert. Your ONLY job is to output a single raw SQL SELECT query.
 
 STRICT RULES:
 1. Output ONLY the SQL query — no explanation, no preamble, no commentary
@@ -141,7 +176,7 @@ STRICT RULES:
 7. If you reference a table in SELECT/WHERE/GROUP BY/ORDER BY, it MUST appear in FROM or JOIN.
 8. If a JOIN PATH or GLOBAL FOREIGN KEY RELATIONSHIPS are provided, use those exact join conditions.
 9. For comparisons to averages or totals, use a subquery; do NOT nest aggregates directly. Do NOT use CTE / WITH.
-10. Use standard PostgreSQL syntax — double quotes for identifiers if needed, NOT backticks
+{dialect_rules['syntax_rules']}
 11. Do not wrap the query in markdown code fences
 12. If you JOIN a subquery, the join key columns MUST be included in that subquery SELECT list
 13. Never reference columns from a subquery alias unless that column is explicitly selected by it
@@ -156,7 +191,7 @@ User Question: {user_prompt}
 SQL query:"""
         
         try:
-            logger.debug(f"SQL generation: model={self.llm_model}, url={self.llm_api_url}")
+            logger.debug("SQL generation via provider")
 
             # Thread-aware path: include prior exchanges as conversation history
             if thread_history:
@@ -237,7 +272,7 @@ Analyze this question step-by-step. Answer these questions:
 Your analysis (be specific with table.column names):"""
 
         try:
-            logger.debug(f"Step 1 - Reasoning: model={self.llm_model}")
+            logger.debug("Step 1 - Reasoning via provider")
             
             # Step 1: Get reasoning
             reasoning = await self._call_chat_completions(reasoning_system, reasoning_prompt, max_tokens=1024)
@@ -320,6 +355,53 @@ Explain this query in plain English:"""
         except Exception as e:
             logger.error(f"Error explaining SQL: {str(e)}")
             return "Unable to generate explanation at this time."
+
+    async def summarize_data(
+        self,
+        user_prompt: str,
+        columns: list,
+        rows: list,
+        row_count: int
+    ) -> str:
+        """Generate a plain-English insight summary of query results.
+
+        Highlights trends, anomalies, key statistics, and actionable takeaways.
+        """
+        if not rows or not columns:
+            return ""
+
+        sample = rows[:25]
+        data_preview = json.dumps(sample, default=str)[:2000]
+
+        system = """You are a data analyst providing insights on query results.
+Given data from a SQL query, provide a concise insight summary (3-5 bullet points).
+
+Focus on:
+- Key statistics (min, max, average, total if numeric)
+- Notable patterns or trends
+- Outliers or anomalies
+- Actionable takeaways
+
+Rules:
+1. Keep each bullet under 50 words
+2. Be specific with numbers from the data
+3. Use plain English — no SQL or technical jargon
+4. If data is too small or simple, just summarize what it shows
+5. Output ONLY the bullet points — no intro or closing text"""
+
+        prompt = f"""Question: {user_prompt}
+Columns: {', '.join(columns)}
+Total rows: {row_count}
+Sample data (first {len(sample)} rows):
+{data_preview}
+
+Provide insight bullets:"""
+
+        try:
+            return await self._call_chat_completions(system, prompt, temperature=0.3, max_tokens=400)
+        except Exception as e:
+            logger.error(f"Error summarizing data: {e}")
+            return ""
 
     async def identify_tables(self, user_prompt: str, table_summaries: list) -> list:
         """Identify relevant tables from provided summaries. Returns list of exact table names."""
@@ -445,7 +527,7 @@ Explain this query in plain English:"""
         )
 
         try:
-            logger.debug(f"Classify intent: model={self.llm_model}, url={self.llm_api_url}")
+            logger.debug("Classify intent via provider")
             out = await self._call_chat_completions(system, text, max_tokens=10)
             out = out.strip().lower()
             if "catalog" in out:
@@ -527,36 +609,23 @@ Return JSON:
             }
 
     async def health_check(self) -> bool:
-        """Check if remote LLM API and local Ollama (embeddings) are reachable"""
-        
+        """Check if LLM provider and local Ollama (embeddings) are reachable."""
         try:
+            provider = get_provider()
+            llm_ok = await provider.health()
+
             async with httpx.AsyncClient() as client:
-                # Check remote LLM endpoint
-                llm_resp = await client.post(
-                    self.llm_api_url,
-                    json={
-                        "model": self.llm_model,
-                        "messages": [{"role": "user", "content": "SELECT 1"}],
-                        "max_tokens": 5,
-                    },
-                    headers={"Content-Type": "application/json"},
-                    timeout=30.0,
-                )
-                llm_ok = llm_resp.status_code == 200
-                
-                # Check local Ollama for embeddings
                 ollama_resp = await client.get(
-                    f"{self.base_url}/api/tags",
-                    timeout=30.0,
+                    f"{self.base_url}/api/tags", timeout=30.0,
                 )
                 ollama_ok = ollama_resp.status_code == 200
-                
-                if not llm_ok:
-                    logger.warning(f"Remote LLM endpoint not reachable: {self.llm_api_url}")
-                if not ollama_ok:
-                    logger.warning(f"Local Ollama not reachable: {self.base_url}")
-                
-                return llm_ok and ollama_ok
+
+            if not llm_ok:
+                logger.warning("LLM provider health check failed")
+            if not ollama_ok:
+                logger.warning(f"Local Ollama not reachable: {self.base_url}")
+
+            return llm_ok and ollama_ok
         except Exception as e:
             logger.error(f"Health check failed: {str(e)}")
             return False

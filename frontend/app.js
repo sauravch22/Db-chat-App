@@ -277,35 +277,16 @@ async function sendMessage() {
     input.value = ''; input.style.height = 'auto';
     setTyping(true);
 
+    const body = {
+        connection_id: selectedConnId || 3,
+        prompt: q,
+    };
+    if (currentThreadId) body.thread_id = currentThreadId;
+
+    // Try SSE streaming first, fallback to regular endpoint
     try {
-        const body = {
-            connection_id: selectedConnId || 3,
-            prompt: q,
-        };
-        if (currentThreadId) body.thread_id = currentThreadId;
-
-        const r = await authFetch(`${chatUrl()}/api/chat`, {
-            method: 'POST',
-            body: JSON.stringify(body)
-        });
-        const data = await r.json();
-        setTyping(false);
-
-        // Capture the thread_id returned by the backend
-        if (data.thread_id) {
-            const isNewThread = !currentThreadId;
-            currentThreadId = data.thread_id;
-            // Refresh thread sidebar (new thread or updated timestamp)
-            loadThreads();
-        }
-
-        if (r.status === 403) {
-            addBotError('Permission denied: you don\'t have "prompt_query" access on this database.');
-        } else if (data.status === 'error') {
-            addBotError(data.error || 'Something went wrong');
-        } else {
-            await addBotReply(q, data);
-        }
+        const sseOk = await _sendViaSSE(q, body);
+        if (!sseOk) await _sendViaRegular(q, body);
     } catch(e) {
         setTyping(false);
         if (e.message && e.message.includes('Session expired')) {
@@ -316,6 +297,140 @@ async function sendMessage() {
     } finally {
         isProcessing = false;
         document.getElementById('sendBtn').disabled = false;
+    }
+}
+
+async function _sendViaSSE(query, body) {
+    try {
+        const r = await fetch(`${chatUrl()}/api/chat/stream`, {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify(body),
+        });
+        if (!r.ok || !r.body) return false;
+
+        const reader = r.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let collected = { sql: null, answer: null, rows: null, columns: null,
+                          row_count: 0, summary: null, thread_id: null,
+                          execution_time_ms: 0, status: 'success', query_time_ms: null };
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            let eventType = null;
+            for (const line of lines) {
+                if (line.startsWith('event: ')) {
+                    eventType = line.slice(7).trim();
+                } else if (line.startsWith('data: ') && eventType) {
+                    const data = line.slice(6);
+                    _handleSSEEvent(eventType, data, collected);
+                    eventType = null;
+                }
+            }
+        }
+
+        setTyping(false);
+
+        if (collected.thread_id) {
+            currentThreadId = collected.thread_id;
+            loadThreads();
+        }
+
+        if (collected.status === 'error' && !collected.sql) {
+            addBotError(collected.answer || 'Something went wrong');
+        } else {
+            await addBotReply(query, collected);
+            if (collected.summary) {
+                _appendSummaryCard(collected.summary);
+            }
+        }
+        return true;
+    } catch (e) {
+        console.warn('SSE stream failed, will fallback:', e.message);
+        return false;
+    }
+}
+
+function _handleSSEEvent(event, data, collected) {
+    switch (event) {
+        case 'status':
+            break;
+        case 'sql':
+            collected.sql = data;
+            break;
+        case 'data':
+            try {
+                const d = JSON.parse(data);
+                collected.columns = d.columns;
+                collected.rows = d.rows;
+                collected.row_count = d.row_count;
+                collected.query_time_ms = d.query_time_ms;
+            } catch {}
+            break;
+        case 'answer':
+            collected.answer = data;
+            break;
+        case 'summary':
+            collected.summary = data;
+            break;
+        case 'error':
+            collected.status = 'error';
+            collected.answer = data;
+            break;
+        case 'done':
+            try {
+                const d = JSON.parse(data);
+                collected.thread_id = d.thread_id;
+                collected.execution_time_ms = d.execution_time_ms || 0;
+                collected.status = d.status || collected.status;
+            } catch {}
+            break;
+    }
+}
+
+function _appendSummaryCard(summary) {
+    const msgs = document.getElementById('messages');
+    if (!msgs) return;
+    const lastBot = msgs.querySelector('.bot-msg:last-of-type') || msgs.lastElementChild;
+    if (!lastBot) return;
+    const card = document.createElement('div');
+    card.className = 'summary-card msg-in';
+    card.innerHTML = `<h5>AI Insights</h5><p>${summary.replace(/\n/g, '<br>')}</p>`;
+    const parent = lastBot.closest('.msg-in') || lastBot;
+    parent.after(card);
+}
+
+async function _sendViaRegular(query, body) {
+    try {
+        const r = await authFetch(`${chatUrl()}/api/chat`, {
+            method: 'POST',
+            body: JSON.stringify(body)
+        });
+        const data = await r.json();
+        setTyping(false);
+
+        if (data.thread_id) {
+            currentThreadId = data.thread_id;
+            loadThreads();
+        }
+
+        if (r.status === 403) {
+            addBotError('Permission denied: you don\'t have "prompt_query" access on this database.');
+        } else if (data.status === 'error') {
+            addBotError(data.error || 'Something went wrong');
+        } else {
+            await addBotReply(query, data);
+        }
+    } catch(e) {
+        setTyping(false);
+        throw e;
     }
 }
 
@@ -701,6 +816,16 @@ async function addBotReply(query, data) {
 
     if (data.rows?.length && data.columns?.length) {
         await fetchChartChips(chartAreaId, data.columns, data.rows, query, data.sql);
+    }
+
+    // F3: Auto-validate SQL
+    if (data.sql && typeof validateQuery === 'function') {
+        validateQuery(data.sql, selectedConnId);
+    }
+
+    // F4: Load follow-up suggestions
+    if (typeof loadSuggestions === 'function') {
+        loadSuggestions(query, data.sql);
     }
 }
 
@@ -1203,11 +1328,31 @@ function hlSQL(sql){
 //  TAB SWITCHING
 // ═════════════════════════════════════════════════════
 function switchTab(tab) {
-    const tabs = ['chatTab', 'adminTab', 'activityTab', 'dashboardTab', 'savedTab'];
-    const btns = ['tabChat', 'tabAdmin', 'tabActivity', 'tabDashboard', 'tabSaved'];
+    const tabs = ['chatTab', 'adminTab', 'activityTab', 'dashboardTab', 'savedTab',
+                  'schemaTab', 'workbenchTab', 'lineageTab', 'intelligenceTab',
+                  'templatesTab', 'crossdbTab', 'erdTab', 'qualityTab', 'optimizerTab',
+                  'trainingTab', 'fileuploadTab', 'pipelineTab', 'apigenTab',
+                  'migrationTab', 'embedTab'];
+    const btns = ['tabChat', 'tabAdmin', 'tabActivity', 'tabDashboard', 'tabSaved',
+                  'tabSchema', 'tabWorkbench', 'tabLineage', 'tabIntelligence',
+                  'tabTemplates', 'tabCrossDb', 'tabErd', 'tabQuality', 'tabOptimizer',
+                  'tabTraining', 'tabFileUpload', 'tabPipeline', 'tabApiGen',
+                  'tabMigration', 'tabEmbed'];
 
     tabs.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
     btns.forEach(id => { const el = document.getElementById(id); if (el) el.classList.remove('active'); });
+
+    const simpleTabMap = {
+        erd: { tab: 'erdTab', btn: 'tabErd', init: 'initErdTab' },
+        quality: { tab: 'qualityTab', btn: 'tabQuality', init: 'initQualityTab' },
+        optimizer: { tab: 'optimizerTab', btn: 'tabOptimizer', init: 'initOptimizerTab' },
+        training: { tab: 'trainingTab', btn: 'tabTraining', init: 'initTrainingTab' },
+        fileupload: { tab: 'fileuploadTab', btn: 'tabFileUpload', init: 'initFileUploadTab' },
+        pipeline: { tab: 'pipelineTab', btn: 'tabPipeline', init: 'initPipelineTab' },
+        apigen: { tab: 'apigenTab', btn: 'tabApiGen', init: 'initApiGenTab' },
+        migration: { tab: 'migrationTab', btn: 'tabMigration', init: 'initMigrationTab' },
+        embed: { tab: 'embedTab', btn: 'tabEmbed', init: 'initEmbedTab' },
+    };
 
     if (tab === 'admin') {
         document.getElementById('adminTab').style.display = '';
@@ -1219,6 +1364,7 @@ function switchTab(tab) {
         if (userMgmtSec) userMgmtSec.style.display = canOnboard ? '' : 'none';
         populateAdminDbSelector();
         populateReindexDbSelector();
+        if (typeof loadLlmProviderSettings === 'function') loadLlmProviderSettings();
     } else if (tab === 'activity') {
         document.getElementById('activityTab').style.display = '';
         document.getElementById('tabActivity').classList.add('active');
@@ -1232,6 +1378,37 @@ function switchTab(tab) {
         document.getElementById('tabSaved').classList.add('active');
         populateSavedQueryFilters();
         loadSavedQueries();
+        if (typeof loadSchedules === 'function') loadSchedules();
+        if (typeof loadWritebacks === 'function') loadWritebacks();
+    } else if (tab === 'schema') {
+        document.getElementById('schemaTab').style.display = '';
+        document.getElementById('tabSchema').classList.add('active');
+        loadSchemaExplorer();
+    } else if (tab === 'workbench') {
+        document.getElementById('workbenchTab').style.display = '';
+        document.getElementById('tabWorkbench').classList.add('active');
+        renderWorkbench();
+    } else if (tab === 'lineage') {
+        document.getElementById('lineageTab').style.display = '';
+        document.getElementById('tabLineage').classList.add('active');
+        loadLineage();
+    } else if (tab === 'intelligence') {
+        document.getElementById('intelligenceTab').style.display = '';
+        document.getElementById('tabIntelligence').classList.add('active');
+        loadIntelligence();
+    } else if (tab === 'templates') {
+        document.getElementById('templatesTab').style.display = '';
+        document.getElementById('tabTemplates').classList.add('active');
+        if (typeof loadTemplates === 'function') loadTemplates();
+    } else if (tab === 'crossdb') {
+        document.getElementById('crossdbTab').style.display = '';
+        document.getElementById('tabCrossDb').classList.add('active');
+        if (typeof loadCrossDbConnections === 'function') loadCrossDbConnections();
+    } else if (simpleTabMap[tab]) {
+        const m = simpleTabMap[tab];
+        document.getElementById(m.tab).style.display = '';
+        document.getElementById(m.btn).classList.add('active');
+        if (typeof window[m.init] === 'function') window[m.init]();
     } else {
         document.getElementById('chatTab').style.display = '';
         document.getElementById('tabChat').classList.add('active');
@@ -2472,6 +2649,10 @@ async function loadSavedQueries() {
                     <span class="text-[10px] text-d-muted">${esc(dbName)}</span>
                     ${sq.folder ? `<span class="sq-folder-badge">${esc(sq.folder)}</span>` : ''}
                     <span class="text-[10px] text-d-muted ml-auto">${sq.run_count} runs · ${ago}</span>
+                </div>
+                <div class="flex gap-1.5 mt-2 border-t border-d-border pt-2">
+                    <button class="chip" onclick="event.stopPropagation();openScheduleModal(${sq.id},'${escAttr(sq.name)}')" title="Schedule">⏰ Schedule</button>
+                    <button class="chip" onclick="event.stopPropagation();addAnnotation(null,${sq.id})" title="Add note">📝 Note</button>
                 </div>
             </div>`;
         });

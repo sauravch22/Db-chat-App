@@ -6,6 +6,14 @@
     <title>DbChat — Talk to your Database</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- CodeMirror 6 — lightweight SQL editor -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/theme/material-darker.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/sql/sql.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/addon/hint/show-hint.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/addon/hint/sql-hint.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/addon/hint/show-hint.min.css">
     <script>
         tailwind.config = {
             theme: {
@@ -166,6 +174,28 @@
         .sq-fav{color:#4a4f65;cursor:pointer;transition:color .15s;font-size:16px}
         .sq-fav:hover,.sq-fav.on{color:#fbbf24}
         .sq-folder-badge{font-size:10px;padding:2px 8px;border-radius:4px;background:rgba(124,110,255,.12);color:#a78bfa;font-weight:500}
+
+        /* ─── CodeMirror dark theme overrides ─── */
+        .CodeMirror{background:#10121a !important;color:#a5b4fc !important;font-family:'JetBrains Mono','Fira Code',monospace !important;font-size:12.5px !important;border:1px solid #252938;border-radius:8px;height:auto;min-height:80px}
+        .CodeMirror-gutters{background:#0d0f14 !important;border-right:1px solid #252938 !important}
+        .CodeMirror-linenumber{color:#4a4f65 !important}
+        .CodeMirror-cursor{border-color:#7c6eff !important}
+        .CodeMirror-selected{background:rgba(124,110,255,.2) !important}
+        .CodeMirror-focused .CodeMirror-selected{background:rgba(124,110,255,.3) !important}
+        .cm-s-material-darker .cm-keyword{color:#c792ea !important}
+        .cm-s-material-darker .cm-string{color:#c3e88d !important}
+        .cm-s-material-darker .cm-number{color:#f78c6c !important}
+        .cm-s-material-darker .cm-comment{color:#546e7a !important}
+        .CodeMirror-hints{background:#13161d !important;border:1px solid #252938 !important;border-radius:8px !important}
+        .CodeMirror-hint{color:#dfe1e8 !important}
+        .CodeMirror-hint-active{background:rgba(124,110,255,.2) !important;color:#fff !important}
+
+        /* ─── SSE streaming indicator ─── */
+        .stream-dot{display:inline-block;width:6px;height:6px;background:#7c6eff;border-radius:50%;animation:streamPulse 1s infinite}
+        @keyframes streamPulse{0%,100%{opacity:.3}50%{opacity:1}}
+        .summary-card{background:#0f1117;border:1px solid #1f2937;border-radius:10px;padding:12px 16px;margin-top:8px}
+        .summary-card h5{font-size:11px;font-weight:600;color:#7c6eff;text-transform:uppercase;letter-spacing:.3px;margin-bottom:6px}
+        .summary-card p{font-size:12.5px;line-height:1.6;color:#bfc4d8;margin:0}
     </style>
 </head>
 <body class="h-screen flex flex-col overflow-hidden">
@@ -236,12 +266,27 @@
         </header>
 
         <!-- Tab bar -->
-        <div id="tabBar" class="tab-bar">
+        <div id="tabBar" class="tab-bar" style="overflow-x:auto;white-space:nowrap">
             <button class="tab-btn active" onclick="switchTab('chat')" id="tabChat">💬 Chat</button>
-            <button class="tab-btn" onclick="switchTab('saved')" id="tabSaved">⭐ Saved Queries</button>
+            <button class="tab-btn" onclick="switchTab('schema')" id="tabSchema">🗂 Schema</button>
+            <button class="tab-btn" onclick="switchTab('workbench')" id="tabWorkbench">⚡ Workbench</button>
+            <button class="tab-btn" onclick="switchTab('saved')" id="tabSaved">⭐ Saved</button>
             <button class="tab-btn" onclick="switchTab('dashboard')" id="tabDashboard">📊 Dashboards</button>
+            <button class="tab-btn" onclick="switchTab('lineage')" id="tabLineage">🔗 Lineage</button>
+            <button class="tab-btn" onclick="switchTab('intelligence')" id="tabIntelligence">📈 Intelligence</button>
+            <button class="tab-btn" onclick="switchTab('templates')" id="tabTemplates">📋 Templates</button>
+            <button class="tab-btn" onclick="switchTab('crossdb')" id="tabCrossDb">🔀 Cross-DB</button>
+            <button class="tab-btn" onclick="switchTab('erd')" id="tabErd">🗺 ERD</button>
+            <button class="tab-btn" onclick="switchTab('quality')" id="tabQuality">✅ Quality</button>
+            <button class="tab-btn" onclick="switchTab('optimizer')" id="tabOptimizer">⚡ Optimizer</button>
+            <button class="tab-btn" onclick="switchTab('training')" id="tabTraining">🧠 Training</button>
+            <button class="tab-btn" onclick="switchTab('fileupload')" id="tabFileUpload">📁 Files</button>
+            <button class="tab-btn" onclick="switchTab('pipeline')" id="tabPipeline">🔄 Pipeline</button>
+            <button class="tab-btn" onclick="switchTab('apigen')" id="tabApiGen">🔌 API</button>
+            <button class="tab-btn" onclick="switchTab('migration')" id="tabMigration">🏗 Migrate</button>
+            <button class="tab-btn" onclick="switchTab('embed')" id="tabEmbed">🧩 Embed</button>
             <button class="tab-btn" onclick="switchTab('admin')" id="tabAdmin" style="display:none">👥 Admin</button>
-            <button class="tab-btn" onclick="switchTab('activity')" id="tabActivity">📋 My Activity</button>
+            <button class="tab-btn" onclick="switchTab('activity')" id="tabActivity">📋 Activity</button>
         </div>
 
         <!-- Chat Tab -->
@@ -251,6 +296,14 @@
         <aside id="threadSidebar" class="flex flex-col border-r border-d-border bg-d-surface shrink-0 overflow-hidden" style="width:230px">
             <div class="p-3 border-b border-d-border flex items-center gap-2">
                 <button onclick="startNewThread()" class="flex-1 text-xs font-semibold py-2 rounded-lg bg-d-accent text-white hover:bg-d-accentH transition" style="letter-spacing:.3px">＋ New Thread</button>
+                <button onclick="openHistorySearch()" class="text-xs text-d-muted hover:text-white border border-d-border rounded-lg px-2 py-2 transition" title="Search history">🔍</button>
+            </div>
+            <!-- F1: History search panel -->
+            <div id="historySearchPanel" class="border-b border-d-border" style="display:none;max-height:300px;overflow:hidden">
+                <div class="p-2">
+                    <input id="historySearchInput" class="search-input" placeholder="Search queries…" oninput="debounceHistorySearch()" style="font-size:11px;padding:6px 10px">
+                </div>
+                <div id="historySearchResults" class="overflow-y-auto" style="max-height:240px"></div>
             </div>
             <div id="threadList" class="flex-1 overflow-y-auto p-2 space-y-0.5">
                 <p class="text-[11px] text-d-muted p-3 text-center">No threads yet</p>
@@ -276,6 +329,10 @@
             <div id="typing" class="hidden max-w-5xl mx-auto mt-4"><div class="flex gap-3"><div class="w-8 h-8 rounded-lg bg-d-accent flex items-center justify-center text-white text-xs font-bold shrink-0">DB</div><div class="bot-msg py-3 px-4"><div class="flex gap-1.5 items-center h-5"><div class="typing-dot w-2 h-2 bg-d-muted rounded-full"></div><div class="typing-dot w-2 h-2 bg-d-muted rounded-full"></div><div class="typing-dot w-2 h-2 bg-d-muted rounded-full"></div></div></div></div></div>
         </main>
 
+        <!-- F4: Suggestions bar -->
+        <div id="suggestionsBar"></div>
+        <!-- F3: Validation panel -->
+        <div id="validationPanel" style="display:none" class="px-4 py-1 max-w-5xl mx-auto"></div>
         <!-- Input -->
         <footer class="shrink-0 border-t border-d-border bg-d-card px-4 py-3">
             <div class="max-w-5xl mx-auto flex gap-3 items-end">
@@ -305,10 +362,23 @@
                         </div>
                         <div>
                             <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Database Type</label>
-                            <select id="adminRegType" class="col-select">
-                                <option value="postgres" selected>PostgreSQL</option>
-                                <option value="mysql">MySQL</option>
-                                <option value="sqlserver">SQL Server</option>
+                            <select id="adminRegType" class="col-select" onchange="onDbTypeChange()">
+                                <optgroup label="SQL Databases">
+                                    <option value="postgres" selected>PostgreSQL</option>
+                                    <option value="mysql">MySQL</option>
+                                    <option value="sqlserver">SQL Server</option>
+                                    <option value="sqlite">SQLite</option>
+                                    <option value="duckdb">DuckDB</option>
+                                    <option value="snowflake">Snowflake</option>
+                                    <option value="bigquery">BigQuery</option>
+                                    <option value="redshift">Redshift</option>
+                                </optgroup>
+                                <optgroup label="NoSQL Databases">
+                                    <option value="mongodb">MongoDB</option>
+                                    <option value="redis">Redis</option>
+                                    <option value="elasticsearch">Elasticsearch</option>
+                                    <option value="neo4j">Neo4j</option>
+                                </optgroup>
                             </select>
                         </div>
                         <div>
@@ -334,6 +404,7 @@
                     </div>
                     <div class="mt-3 flex items-center justify-between">
                         <span id="adminOnboardStatus" class="text-xs text-d-muted"></span>
+                        <button onclick="testConnection()" class="chip" style="background:rgba(52,211,153,.1);color:#34d399;border-color:rgba(52,211,153,.25)">🔌 Test Connection</button>
                         <button id="adminOnboardBtn" onclick="submitRegisterDb()" class="chip">➕ Register Database</button>
                     </div>
                 </div>
@@ -354,6 +425,44 @@
                     </div>
                     <div class="mt-2">
                         <span id="reindexStatus" class="text-xs text-d-muted"></span>
+                    </div>
+                </div>
+
+                <!-- LLM Provider Settings -->
+                <div class="bg-d-card border border-d-border rounded-xl p-4 mb-6">
+                    <div class="flex items-center justify-between mb-3">
+                        <div>
+                            <h2 class="text-sm font-semibold text-white">LLM Provider</h2>
+                            <p class="text-xs text-d-muted mt-1">Switch between Ollama, OpenAI, Anthropic, or any OpenAI-compatible API.</p>
+                        </div>
+                        <div id="llmHealthBadge" class="text-xs px-2 py-1 rounded bg-d-input text-d-muted">Checking…</div>
+                    </div>
+                    <div class="grid md:grid-cols-2 gap-3">
+                        <div>
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Provider</label>
+                            <select id="llmProvider" class="col-select" style="width:100%" onchange="onLlmProviderSelect()">
+                                <option value="ollama_local">Ollama (Local)</option>
+                                <option value="openai">OpenAI</option>
+                                <option value="anthropic">Anthropic Claude</option>
+                                <option value="custom">Custom (OpenAI-compatible)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Model</label>
+                            <input id="llmModel" class="search-input" placeholder="e.g. mistral, gpt-4o-mini" value="mistral">
+                        </div>
+                        <div id="llmUrlWrap">
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">API URL</label>
+                            <input id="llmApiUrl" class="search-input" placeholder="http://localhost:11434">
+                        </div>
+                        <div id="llmKeyWrap" style="display:none">
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">API Key</label>
+                            <input id="llmApiKey" type="password" class="search-input" placeholder="sk-…">
+                        </div>
+                    </div>
+                    <div class="mt-3 flex items-center justify-between">
+                        <span id="llmSaveStatus" class="text-xs text-d-muted"></span>
+                        <button onclick="saveLlmProvider()" class="chip">💾 Save Provider</button>
                     </div>
                 </div>
 
@@ -547,6 +656,30 @@
                 <div id="savedQueryGrid" class="grid gap-3" style="grid-template-columns:repeat(auto-fill,minmax(340px,1fr))">
                     <p class="text-sm text-d-muted">Loading saved queries…</p>
                 </div>
+
+                <!-- F6: Scheduled Queries Section -->
+                <div class="mt-8">
+                    <div class="flex items-center justify-between mb-4">
+                        <div>
+                            <h3 class="text-base font-semibold text-white">⏰ Scheduled Queries</h3>
+                            <p class="text-xs text-d-muted mt-1">Automated query execution with optional alerts.</p>
+                        </div>
+                        <button onclick="loadSchedules()" class="chip">↻ Refresh</button>
+                    </div>
+                    <div id="scheduledQueriesContent"><p class="text-sm text-d-muted">Loading schedules…</p></div>
+                </div>
+
+                <!-- F7: Write-Back Requests Section -->
+                <div class="mt-8">
+                    <div class="flex items-center justify-between mb-4">
+                        <div>
+                            <h3 class="text-base font-semibold text-white">✏️ Write-Back Requests</h3>
+                            <p class="text-xs text-d-muted mt-1">Controlled data modifications with approval workflow.</p>
+                        </div>
+                        <button onclick="openWritebackModal()" class="chip">＋ New Request</button>
+                    </div>
+                    <div id="writebackContent"><p class="text-sm text-d-muted">Loading…</p></div>
+                </div>
             </div>
         </div><!-- /savedTab -->
 
@@ -624,7 +757,435 @@
                 <div id="userModalPagination" class="flex items-center justify-center gap-3 px-6 py-3 border-t border-d-border"></div>
             </div>
         </div>
+        <!-- ═══════════ SCHEMA EXPLORER TAB (F2) ═══════════ -->
+        <div id="schemaTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div>
+                        <h2 class="text-lg font-semibold text-white">Schema Explorer</h2>
+                        <p class="text-xs text-d-muted mt-1">Visual overview of tables, columns, and relationships.</p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <input id="schemaSearchInput" class="search-input" style="width:200px;font-size:12px;padding:7px 12px" placeholder="Filter tables/columns…" oninput="filterSchema()">
+                        <button onclick="loadSchemaExplorer()" class="chip">↻ Refresh</button>
+                    </div>
+                </div>
+                <div id="schemaExplorerContent"><p class="text-sm text-d-muted">Loading…</p></div>
+            </div>
+        </div>
+
+        <!-- ═══════════ WORKBENCH TAB (F8) ═══════════ -->
+        <div id="workbenchTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div>
+                        <h2 class="text-lg font-semibold text-white">Multi-Query Workbench</h2>
+                        <p class="text-xs text-d-muted mt-1">Execute multiple queries side by side and compare results.</p>
+                    </div>
+                </div>
+                <div id="workbenchContent"></div>
+            </div>
+        </div>
+
+        <!-- ═══════════ LINEAGE TAB (F9) ═══════════ -->
+        <div id="lineageTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div>
+                        <h2 class="text-lg font-semibold text-white">Data Lineage</h2>
+                        <p class="text-xs text-d-muted mt-1">Table dependencies, usage patterns, and impact analysis.</p>
+                    </div>
+                    <button onclick="loadLineage()" class="chip">↻ Refresh</button>
+                </div>
+                <div id="lineageContent"><p class="text-sm text-d-muted">Loading…</p></div>
+            </div>
+        </div>
+
+        <!-- ═══════════ INTELLIGENCE TAB (F10) ═══════════ -->
+        <div id="intelligenceTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div>
+                        <h2 class="text-lg font-semibold text-white">Connection Intelligence</h2>
+                        <p class="text-xs text-d-muted mt-1">Database performance, stats, and recommendations.</p>
+                    </div>
+                    <button onclick="loadIntelligence()" class="chip">↻ Refresh</button>
+                </div>
+                <div id="intelligenceContent"><p class="text-sm text-d-muted">Loading…</p></div>
+            </div>
+        </div>
+
+        <!-- ═══════════ TEMPLATES TAB ═══════════ -->
+        <div id="templatesTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div>
+                        <h2 class="text-lg font-semibold text-white">Query Templates</h2>
+                        <p class="text-xs text-d-muted mt-1">Pre-built SQL patterns — fill in variables and execute.</p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <select id="templateCategoryFilter" class="col-select" onchange="loadTemplates()">
+                            <option value="">All categories</option>
+                        </select>
+                        <button onclick="loadTemplates()" class="chip">↻ Refresh</button>
+                    </div>
+                </div>
+                <div id="templatesContent"><p class="text-sm text-d-muted">Loading templates…</p></div>
+            </div>
+        </div>
+
+        <!-- ═══════════ CROSS-DB TAB ═══════════ -->
+        <div id="crossdbTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div>
+                        <h2 class="text-lg font-semibold text-white">Cross-Database Query</h2>
+                        <p class="text-xs text-d-muted mt-1">Execute the same query against multiple databases and compare results.</p>
+                    </div>
+                </div>
+                <div class="grid gap-4 mb-4" style="grid-template-columns:1fr 1fr">
+                    <div>
+                        <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Select Databases</label>
+                        <div id="crossDbConnectionList" class="space-y-1 max-h-48 overflow-y-auto bg-d-input border border-d-border rounded-lg p-2"></div>
+                    </div>
+                    <div>
+                        <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Merge Mode</label>
+                        <select id="crossDbMergeMode" class="col-select" style="width:100%">
+                            <option value="union">Union (stack rows)</option>
+                            <option value="side_by_side">Side by Side</option>
+                        </select>
+                    </div>
+                </div>
+                <div>
+                    <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">SQL Query</label>
+                    <textarea id="crossDbSql" class="search-input font-mono" rows="5" style="font-size:12px;resize:vertical" placeholder="SELECT COUNT(*) as total FROM orders"></textarea>
+                </div>
+                <div class="mt-3 flex items-center gap-2">
+                    <button onclick="executeCrossDb()" class="chip" style="background:rgba(124,110,255,.15);color:#a78bfa;border-color:rgba(124,110,255,.3)">▶ Execute Across Databases</button>
+                    <span id="crossDbStatus" class="text-xs text-d-muted"></span>
+                </div>
+                <div id="crossDbResults" class="mt-4"></div>
+            </div>
+        </div>
+
+        <!-- ═══════ ERD Tab ═══════ -->
+        <div id="erdTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div><h2 class="text-lg font-semibold text-white">Entity Relationship Diagram</h2>
+                    <p class="text-xs text-d-muted mt-1">Visualize table relationships as a Mermaid ER diagram.</p></div>
+                </div>
+                <div class="mb-3">
+                    <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Connection</label>
+                    <select id="erdConnectionSelect" class="col-select" style="width:300px" onchange="loadErd()">
+                        <option value="">— Select connection —</option>
+                    </select>
+                </div>
+                <div id="erdDiagram" class="bg-d-card border border-d-border rounded-xl p-6" style="min-height:300px">
+                    <p class="text-xs text-d-muted text-center">Select a connection to generate ERD</p>
+                </div>
+                <div id="erdMermaidSrc" class="mt-3" style="display:none">
+                    <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Mermaid Source</label>
+                    <textarea id="erdMermaidText" class="search-input font-mono" rows="8" readonly style="font-size:11px"></textarea>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══════ Data Quality Tab ═══════ -->
+        <div id="qualityTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div><h2 class="text-lg font-semibold text-white">Data Quality Scanner</h2>
+                    <p class="text-xs text-d-muted mt-1">Scan tables for nulls, duplicates, and data freshness.</p></div>
+                </div>
+                <div class="flex gap-3 mb-4">
+                    <div>
+                        <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Connection</label>
+                        <select id="qualityConnSelect" class="col-select" style="width:250px" onchange="loadQualityOverview()">
+                            <option value="">— Select —</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Table</label>
+                        <input id="qualityTableInput" class="search-input" placeholder="e.g. orders" style="width:200px">
+                    </div>
+                    <div class="flex items-end">
+                        <button onclick="runQualityScan()" class="chip" style="background:rgba(52,211,153,.15);color:#34d399;border-color:rgba(52,211,153,.3)">🔍 Scan Table</button>
+                    </div>
+                </div>
+                <div id="qualityOverview" class="mb-4"></div>
+                <div id="qualityScanResult" class="bg-d-card border border-d-border rounded-xl p-4" style="min-height:100px">
+                    <p class="text-xs text-d-muted text-center">Select a connection and table to scan</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══════ Query Optimizer Tab ═══════ -->
+        <div id="optimizerTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div><h2 class="text-lg font-semibold text-white">AI Query Optimizer</h2>
+                    <p class="text-xs text-d-muted mt-1">Analyze SQL queries for performance issues and get optimization suggestions.</p></div>
+                </div>
+                <div class="mb-3">
+                    <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Connection</label>
+                    <select id="optimizerConnSelect" class="col-select" style="width:300px"><option value="">— Select —</option></select>
+                </div>
+                <div class="mb-3">
+                    <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">SQL Query to Optimize</label>
+                    <textarea id="optimizerSqlInput" class="search-input font-mono" rows="5" style="font-size:12px;resize:vertical" placeholder="SELECT * FROM orders WHERE status = 'pending'"></textarea>
+                </div>
+                <button onclick="runOptimizer()" class="chip" style="background:rgba(124,110,255,.15);color:#a78bfa;border-color:rgba(124,110,255,.3)">⚡ Analyze Query</button>
+                <span id="optimizerStatus" class="text-xs text-d-muted ml-2"></span>
+                <div id="optimizerResult" class="mt-4"></div>
+            </div>
+        </div>
+
+        <!-- ═══════ Training/RAG Tab ═══════ -->
+        <div id="trainingTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div><h2 class="text-lg font-semibold text-white">Training Pairs (RAG)</h2>
+                    <p class="text-xs text-d-muted mt-1">Verified question-query pairs that improve AI accuracy over time.</p></div>
+                </div>
+                <div class="mb-3">
+                    <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Connection</label>
+                    <select id="trainingConnSelect" class="col-select" style="width:300px" onchange="loadTrainingPairs()"><option value="">— All —</option></select>
+                </div>
+                <div id="trainingPairsList" class="space-y-2"></div>
+                <div class="mt-4 bg-d-card border border-d-border rounded-xl p-4">
+                    <h3 class="text-sm font-semibold text-white mb-3">Add Training Pair</h3>
+                    <div class="grid gap-3" style="grid-template-columns:1fr 1fr">
+                        <div>
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Question (NL)</label>
+                            <input id="trainQuestion" class="search-input" placeholder="e.g. Show total revenue by month">
+                        </div>
+                        <div>
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Query</label>
+                            <input id="trainQuery" class="search-input font-mono" placeholder="SELECT ... FROM ...">
+                        </div>
+                    </div>
+                    <button onclick="addTrainingPair()" class="chip mt-3" style="background:rgba(52,211,153,.15);color:#34d399;border-color:rgba(52,211,153,.3)">+ Add Pair</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══════ File Upload Tab ═══════ -->
+        <div id="fileuploadTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div><h2 class="text-lg font-semibold text-white">File Upload & Query</h2>
+                    <p class="text-xs text-d-muted mt-1">Upload CSV, Excel, Parquet, or JSON files and query them with SQL instantly.</p></div>
+                </div>
+                <div class="bg-d-card border border-d-border rounded-xl p-6 mb-4" style="border-style:dashed">
+                    <div class="text-center">
+                        <p class="text-sm text-d-muted mb-3">Drop a file here or click to browse</p>
+                        <input type="file" id="fileUploadInput" accept=".csv,.tsv,.xlsx,.xls,.parquet,.json,.jsonl" onchange="handleFileUpload()" class="hidden">
+                        <button onclick="document.getElementById('fileUploadInput').click()" class="chip" style="background:rgba(124,110,255,.15);color:#a78bfa;border-color:rgba(124,110,255,.3)">📁 Choose File</button>
+                        <span id="fileUploadStatus" class="text-xs text-d-muted ml-2"></span>
+                    </div>
+                </div>
+                <div id="uploadedTables" class="mb-4"></div>
+                <div id="fileQuerySection" style="display:none">
+                    <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Query Uploaded Data</label>
+                    <textarea id="fileQuerySql" class="search-input font-mono" rows="3" style="font-size:12px;resize:vertical" placeholder='SELECT * FROM my_table LIMIT 10'></textarea>
+                    <button onclick="queryUploadedFile()" class="chip mt-2" style="background:rgba(124,110,255,.15);color:#a78bfa;border-color:rgba(124,110,255,.3)">▶ Run Query</button>
+                    <div id="fileQueryResult" class="mt-3"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══════ Pipeline Tab ═══════ -->
+        <div id="pipelineTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div><h2 class="text-lg font-semibold text-white">Data Pipeline Builder</h2>
+                    <p class="text-xs text-d-muted mt-1">Extract data from one database and load into another.</p></div>
+                </div>
+                <div class="grid gap-4" style="grid-template-columns:1fr 1fr">
+                    <div class="bg-d-card border border-d-border rounded-xl p-4">
+                        <h3 class="text-sm font-semibold text-d-accent mb-3">Source</h3>
+                        <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Connection</label>
+                        <select id="pipelineSrcConn" class="col-select mb-2" style="width:100%"><option value="">— Select —</option></select>
+                        <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Extract SQL</label>
+                        <textarea id="pipelineExtractSql" class="search-input font-mono" rows="4" style="font-size:12px" placeholder="SELECT * FROM orders WHERE created_at > '2024-01-01'"></textarea>
+                    </div>
+                    <div class="bg-d-card border border-d-border rounded-xl p-4">
+                        <h3 class="text-sm font-semibold text-d-green mb-3">Target</h3>
+                        <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Connection</label>
+                        <select id="pipelineTgtConn" class="col-select mb-2" style="width:100%"><option value="">— Select —</option></select>
+                        <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Target Table Name</label>
+                        <input id="pipelineTargetTable" class="search-input mb-2" placeholder="orders_backup">
+                        <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Mode</label>
+                        <select id="pipelineMode" class="col-select" style="width:100%">
+                            <option value="replace">Replace</option>
+                            <option value="append">Append</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="mt-3 flex items-center gap-2">
+                    <button onclick="executePipeline()" class="chip" style="background:rgba(52,211,153,.15);color:#34d399;border-color:rgba(52,211,153,.3)">🔄 Run Pipeline</button>
+                    <button onclick="previewPipeline()" class="chip">👁 Preview Source</button>
+                    <span id="pipelineStatus" class="text-xs text-d-muted"></span>
+                </div>
+                <div id="pipelineResult" class="mt-4"></div>
+            </div>
+        </div>
+
+        <!-- ═══════ API Generator Tab ═══════ -->
+        <div id="apigenTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div><h2 class="text-lg font-semibold text-white">API Endpoint Generator</h2>
+                    <p class="text-xs text-d-muted mt-1">Turn any saved query into a REST API endpoint with an API key.</p></div>
+                </div>
+                <div class="bg-d-card border border-d-border rounded-xl p-4 mb-4">
+                    <h3 class="text-sm font-semibold text-white mb-3">Create New Endpoint</h3>
+                    <div class="grid gap-3" style="grid-template-columns:1fr 1fr">
+                        <div>
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Saved Query</label>
+                            <select id="apiGenQuerySelect" class="col-select" style="width:100%"><option value="">— Select saved query —</option></select>
+                        </div>
+                        <div>
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">URL Slug</label>
+                            <input id="apiGenSlug" class="search-input" placeholder="e.g. daily-sales">
+                        </div>
+                    </div>
+                    <button onclick="generateApiEndpoint()" class="chip mt-3" style="background:rgba(124,110,255,.15);color:#a78bfa;border-color:rgba(124,110,255,.3)">🔌 Generate Endpoint</button>
+                </div>
+                <div id="apiGenList" class="space-y-2"></div>
+            </div>
+        </div>
+
+        <!-- ═══════ Migration Tab ═══════ -->
+        <div id="migrationTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div><h2 class="text-lg font-semibold text-white">Schema Migration (NL to DDL)</h2>
+                    <p class="text-xs text-d-muted mt-1">Describe schema changes in plain English and get SQL migration scripts.</p></div>
+                </div>
+                <div class="mb-3">
+                    <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Connection</label>
+                    <select id="migrationConnSelect" class="col-select" style="width:300px"><option value="">— Select —</option></select>
+                </div>
+                <div class="mb-3">
+                    <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Describe the Change</label>
+                    <textarea id="migrationDescription" class="search-input" rows="3" style="resize:vertical" placeholder="e.g. Add an email column to the users table, add an index on created_at in orders"></textarea>
+                </div>
+                <div class="flex items-center gap-2 mb-4">
+                    <button onclick="generateMigration(true)" class="chip" style="background:rgba(124,110,255,.15);color:#a78bfa;border-color:rgba(124,110,255,.3)">📝 Generate (Dry Run)</button>
+                    <button onclick="generateMigration(false)" class="chip" style="background:rgba(248,113,113,.15);color:#f87171;border-color:rgba(248,113,113,.3)">⚠ Execute Migration</button>
+                    <span id="migrationStatus" class="text-xs text-d-muted"></span>
+                </div>
+                <div id="migrationResult" class="bg-d-card border border-d-border rounded-xl p-4" style="min-height:80px">
+                    <p class="text-xs text-d-muted text-center">Describe a change and click Generate</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══════ Embed Tab ═══════ -->
+        <div id="embedTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div><h2 class="text-lg font-semibold text-white">Embeddable Chat Widget</h2>
+                    <p class="text-xs text-d-muted mt-1">Generate an embeddable widget to add DB chat to any website.</p></div>
+                </div>
+                <div class="bg-d-card border border-d-border rounded-xl p-4 mb-4">
+                    <h3 class="text-sm font-semibold text-white mb-3">Create Widget</h3>
+                    <div class="grid gap-3" style="grid-template-columns:1fr 1fr">
+                        <div>
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Connection</label>
+                            <select id="embedConnSelect" class="col-select" style="width:100%"><option value="">— Select —</option></select>
+                        </div>
+                        <div>
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Title</label>
+                            <input id="embedTitle" class="search-input" value="Database Chat" placeholder="Widget title">
+                        </div>
+                    </div>
+                    <button onclick="createEmbedWidget()" class="chip mt-3" style="background:rgba(124,110,255,.15);color:#a78bfa;border-color:rgba(124,110,255,.3)">🧩 Generate Widget</button>
+                </div>
+                <div id="embedSnippet" style="display:none">
+                    <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Embed Code (copy to your website)</label>
+                    <textarea id="embedCode" class="search-input font-mono" rows="4" readonly style="font-size:11px"></textarea>
+                    <button onclick="navigator.clipboard.writeText(document.getElementById('embedCode').value)" class="chip mt-2">📋 Copy to Clipboard</button>
+                </div>
+                <div id="embedTokensList" class="mt-4"></div>
+            </div>
+        </div>
+
     </div><!-- /appShell -->
+
+    <!-- ═══════════ SCHEDULE MODAL (F6) ═══════════ -->
+    <div id="scheduleModal" class="modal-overlay" onclick="if(event.target===this)closeScheduleModal()">
+        <div class="modal-box" style="max-width:480px">
+            <div class="modal-header">
+                <h3 class="text-sm font-semibold text-white flex-1">⏰ Schedule Query</h3>
+                <button class="modal-close" onclick="closeScheduleModal()">✕</button>
+            </div>
+            <div class="modal-body" style="padding:20px">
+                <input type="hidden" id="schedSavedQueryId">
+                <div class="space-y-4">
+                    <div>
+                        <label class="text-xs text-d-muted font-semibold uppercase block mb-1.5">Schedule Name</label>
+                        <input id="schedName" class="search-input" placeholder="e.g. Daily Sales Report">
+                    </div>
+                    <div>
+                        <label class="text-xs text-d-muted font-semibold uppercase block mb-1.5">Frequency</label>
+                        <select id="schedPreset" class="col-select" style="width:100%" onchange="document.getElementById('schedCustomCronWrap').style.display=this.value==='custom'?'':'none'">
+                            <option value="daily_9am">Daily at 9 AM</option>
+                            <option value="daily_6pm">Daily at 6 PM</option>
+                            <option value="every_hour">Every Hour</option>
+                            <option value="weekly_monday">Weekly (Monday 9 AM)</option>
+                            <option value="weekly_friday">Weekly (Friday 5 PM)</option>
+                            <option value="monthly_first">Monthly (1st at 9 AM)</option>
+                            <option value="custom">Custom Cron…</option>
+                        </select>
+                    </div>
+                    <div id="schedCustomCronWrap" style="display:none">
+                        <label class="text-xs text-d-muted font-semibold uppercase block mb-1.5">Cron Expression</label>
+                        <input id="schedCustomCron" class="search-input" placeholder="0 9 * * *">
+                    </div>
+                    <div>
+                        <label class="text-xs text-d-muted font-semibold uppercase block mb-1.5">Alert Condition</label>
+                        <select id="schedAlertType" class="col-select" style="width:100%" onchange="document.getElementById('schedAlertValueWrap').style.display=this.value!=='none'?'':'none'">
+                            <option value="none">No Alert</option>
+                            <option value="row_count">Row count exceeds…</option>
+                            <option value="no_results">No results returned</option>
+                        </select>
+                    </div>
+                    <div id="schedAlertValueWrap" style="display:none">
+                        <label class="text-xs text-d-muted font-semibold uppercase block mb-1.5">Threshold Value</label>
+                        <input id="schedAlertValue" class="search-input" type="number" placeholder="100">
+                    </div>
+                    <button onclick="submitSchedule()" class="w-full" style="background:#7c6eff;color:#fff;border:none;border-radius:10px;padding:10px;font-size:13px;font-weight:600;cursor:pointer">⏰ Create Schedule</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══════════ WRITE-BACK MODAL (F7) ═══════════ -->
+    <div id="writebackModal" class="modal-overlay" onclick="if(event.target===this)closeWritebackModal()">
+        <div class="modal-box" style="max-width:560px">
+            <div class="modal-header">
+                <h3 class="text-sm font-semibold text-white flex-1">✏️ Write-Back Request</h3>
+                <button class="modal-close" onclick="closeWritebackModal()">✕</button>
+            </div>
+            <div class="modal-body" style="padding:20px">
+                <div class="space-y-4">
+                    <div>
+                        <label class="text-xs text-d-muted font-semibold uppercase block mb-1.5">SQL (INSERT, UPDATE, or DELETE)</label>
+                        <textarea id="wbSql" class="search-input" rows="5" style="font-family:monospace;font-size:12px;resize:vertical" placeholder="UPDATE products SET price = 29.99 WHERE id = 42"></textarea>
+                    </div>
+                    <div>
+                        <label class="text-xs text-d-muted font-semibold uppercase block mb-1.5">Reason (optional)</label>
+                        <input id="wbReason" class="search-input" placeholder="Why is this change needed?">
+                    </div>
+                    <p class="text-[10px] text-d-muted">Write-back requests require admin approval before execution.</p>
+                    <button onclick="submitWriteback()" class="w-full" style="background:#7c6eff;color:#fff;border:none;border-radius:10px;padding:10px;font-size:13px;font-weight:600;cursor:pointer">Submit Request</button>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <!-- Chart Modal -->
     <div id="chartModal" class="modal-overlay" onclick="if(event.target===this)closeChartModal()">
@@ -724,7 +1285,10 @@
         </div>
     </div>
 
-    <script src="app.js?v=14.0"></script>
+    <script src="app.js?v=16.0"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>mermaid.initialize({startOnLoad:false, theme:'dark'});</script>
+    <script src="features.js?v=17.0"></script>
     <style>@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}</style>
 </body>
 </html>

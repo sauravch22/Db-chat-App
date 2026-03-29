@@ -6,6 +6,7 @@ import uuid
 from decimal import Decimal
 from datetime import datetime, date
 from fastapi import APIRouter, HTTPException, Depends, Request, Query as QParam
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import logging
@@ -115,6 +116,54 @@ async def get_chat_history(
             .limit(limit)
             .all()
         )
+        items = []
+        for e in entries:
+            items.append(ChatHistoryItem(
+                id=e.id,
+                connection_id=e.connection_id,
+                thread_id=e.thread_id,
+                thread_title=e.thread_title,
+                prompt=e.prompt,
+                answer=e.answer,
+                sql=e.sql,
+                columns=json.loads(e.columns) if e.columns else None,
+                rows=json.loads(e.rows) if e.rows else None,
+                row_count=e.row_count,
+                execution_time_ms=e.execution_time_ms,
+                selected_tables=json.loads(e.selected_tables) if e.selected_tables else None,
+                status=e.status,
+                error_message=e.error_message,
+                created_at=e.created_at.isoformat() if e.created_at else "",
+            ))
+        return items
+    finally:
+        db.close()
+
+
+@router.get("/history/search")
+async def search_chat_history(
+    connection_id: int = QParam(...),
+    q: str = QParam("", description="Search term"),
+    limit: int = QParam(50, ge=1, le=200),
+    user: dict = Depends(get_current_user),
+):
+    """Search chat history by prompt, SQL, or answer text."""
+    db = SessionLocal()
+    try:
+        from sqlalchemy import or_
+        query = (
+            db.query(ChatHistory)
+            .filter(ChatHistory.user_id == int(user["sub"]),
+                    ChatHistory.connection_id == connection_id)
+        )
+        if q.strip():
+            term = f"%{q.strip()}%"
+            query = query.filter(or_(
+                ChatHistory.prompt.ilike(term),
+                ChatHistory.sql.ilike(term),
+                ChatHistory.answer.ilike(term),
+            ))
+        entries = query.order_by(ChatHistory.created_at.desc()).limit(limit).all()
         items = []
         for e in entries:
             items.append(ChatHistoryItem(
@@ -275,6 +324,124 @@ async def chat(
                            duration_ms=dur)
         logger.error(f"Chat endpoint error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/stream")
+async def chat_stream(
+    request: ChatRequest,
+    req: Request,
+    user: dict = Depends(get_current_user),
+):
+    """SSE streaming chat endpoint.
+
+    Sends a sequence of Server-Sent Events:
+      event: status   — progress updates ("Finding tables…", "Generating SQL…", etc.)
+      event: sql      — the generated SQL
+      event: data     — JSON with rows, columns, row_count
+      event: answer   — natural-language answer text
+      event: summary  — AI-generated data summary (Sprint 2)
+      event: error    — error message
+      event: done     — signals end of stream
+    """
+    if not has_db_permission(user, request.connection_id, "prompt_query"):
+        raise HTTPException(status_code=403, detail="Permission 'prompt_query' required")
+
+    async def event_generator():
+        t0 = time.time()
+        try:
+            yield _sse("status", "Connecting to database…")
+            chat_service = ChatService()
+
+            thread_id = request.thread_id or str(uuid.uuid4())
+            is_new_thread = request.thread_id is None
+
+            thread_history = []
+            if not is_new_thread:
+                th_db = SessionLocal()
+                try:
+                    entries = (
+                        th_db.query(ChatHistory)
+                        .filter(ChatHistory.thread_id == thread_id,
+                                ChatHistory.status == "success",
+                                ChatHistory.sql.isnot(None))
+                        .order_by(ChatHistory.created_at.asc())
+                        .all()
+                    )
+                    thread_history = [{"prompt": e.prompt, "sql": e.sql} for e in entries]
+                finally:
+                    th_db.close()
+
+            thread_title = request.prompt[:80].strip() if is_new_thread else None
+            yield _sse("status", "Finding relevant tables…")
+
+            try:
+                result = await chat_service.process_query(
+                    connection_id=request.connection_id,
+                    user_prompt=request.prompt,
+                    top_k_tables=request.top_k_tables,
+                    thread_history=thread_history if thread_history else None,
+                )
+
+                if result.get("sql"):
+                    yield _sse("sql", result["sql"])
+
+                if result.get("status") == "success" and result.get("rows") is not None:
+                    yield _sse("status", "Query executed successfully")
+                    data_payload = {
+                        "columns": result.get("columns", []),
+                        "rows": result.get("rows", []),
+                        "row_count": result.get("row_count", 0),
+                        "query_time_ms": result.get("query_time_ms"),
+                    }
+                    yield _sse("data", json.dumps(data_payload, default=_safe_json))
+
+                if result.get("answer"):
+                    yield _sse("answer", result["answer"])
+
+                if result.get("status") == "error":
+                    yield _sse("error", result.get("error", "Unknown error"))
+
+                # Try AI data summary (Sprint 2) — non-blocking
+                if result.get("rows") and result.get("columns"):
+                    try:
+                        from app.services.ollama_service import OllamaService
+                        svc = OllamaService()
+                        summary = await svc.summarize_data(
+                            request.prompt, result["columns"], result["rows"],
+                            result.get("row_count", 0)
+                        )
+                        if summary:
+                            yield _sse("summary", summary)
+                    except Exception:
+                        pass
+
+                _save_chat_history(user, request.connection_id, request.prompt, result,
+                                   thread_id=thread_id, thread_title=thread_title)
+
+                dur = int((time.time() - t0) * 1000)
+                yield _sse("done", json.dumps({
+                    "thread_id": thread_id,
+                    "execution_time_ms": result.get("execution_time_ms", dur),
+                    "status": result.get("status", "error"),
+                }))
+
+            finally:
+                chat_service.close()
+
+        except Exception as e:
+            logger.error("SSE stream error: %s", e, exc_info=True)
+            yield _sse("error", str(e))
+            yield _sse("done", json.dumps({"status": "error"}))
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
+
+
+def _sse(event: str, data: str) -> str:
+    """Format a single SSE message."""
+    safe = data.replace("\n", "\ndata: ")
+    return f"event: {event}\ndata: {safe}\n\n"
 
 
 class ExecuteRequest(BaseModel):

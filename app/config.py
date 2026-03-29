@@ -23,9 +23,11 @@ class Settings(BaseSettings):
     QDRANT_API_KEY: str = Field(default="your_qdrant_api_key_here", alias="QDRANT_API_KEY")
     QDRANT_COLLECTION: str = Field(default="dbchat_embeddings", alias="QDRANT_COLLECTION")
     
-    # Remote LLM (Qwen3-Coder-Next via OpenAI-compatible API)
-    LLM_API_URL: str = Field(default="https://517d6b5cb913.ngrok.app/v1/chat/completions", alias="LLM_API_URL")
-    LLM_MODEL_NAME: str = Field(default="Qwen/Qwen3-Coder-Next", alias="LLM_MODEL_NAME")
+    # LLM provider: ollama_local | openai | anthropic | custom
+    LLM_PROVIDER: str = Field(default="ollama_local", alias="LLM_PROVIDER")
+    LLM_API_URL: str = Field(default="http://localhost:11434", alias="LLM_API_URL")
+    LLM_MODEL_NAME: str = Field(default="mistral", alias="LLM_MODEL_NAME")
+    LLM_API_KEY: str = Field(default="", alias="LLM_API_KEY")
     LLM_TIMEOUT_SEC: float = Field(default=120.0, alias="LLM_TIMEOUT_SEC")
     LLM_MAX_TOKENS: int = Field(default=512, alias="LLM_MAX_TOKENS")
     
