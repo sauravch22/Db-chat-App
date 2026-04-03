@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  viz-service:
+    build: .
+    container_name: dbchat_viz_service
+    ports:
+      - "8001:8001"
+    environment:
+      - LOG_LEVEL=INFO
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    networks:
+      - dbchat
+
+networks:
+  dbchat:
+    external: true

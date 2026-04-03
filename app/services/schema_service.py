@@ -12,6 +12,34 @@ logger = logging.getLogger(__name__)
 class SchemaExtractor:
     """Extract schema from user databases"""
     
+    SUPPORTED_DB_TYPES = [
+        {"id": "postgres", "name": "PostgreSQL", "aliases": ["postgresql"],
+         "needs_host": True, "default_port": 5432},
+        {"id": "mysql", "name": "MySQL", "aliases": [],
+         "needs_host": True, "default_port": 3306},
+        {"id": "sqlserver", "name": "SQL Server", "aliases": ["mssql"],
+         "needs_host": True, "default_port": 1433},
+        {"id": "sqlite", "name": "SQLite", "aliases": [],
+         "needs_host": False, "default_port": 0},
+        {"id": "duckdb", "name": "DuckDB", "aliases": [],
+         "needs_host": False, "default_port": 0},
+        {"id": "snowflake", "name": "Snowflake", "aliases": [],
+         "needs_host": True, "default_port": 443},
+        {"id": "bigquery", "name": "BigQuery", "aliases": ["bq"],
+         "needs_host": False, "default_port": 0},
+        {"id": "redshift", "name": "Redshift", "aliases": [],
+         "needs_host": True, "default_port": 5439},
+        # NoSQL (schema extraction handled by nosql_service)
+        {"id": "mongodb", "name": "MongoDB", "aliases": ["mongo"],
+         "needs_host": True, "default_port": 27017},
+        {"id": "redis", "name": "Redis", "aliases": [],
+         "needs_host": True, "default_port": 6379},
+        {"id": "elasticsearch", "name": "Elasticsearch", "aliases": ["elastic", "es"],
+         "needs_host": True, "default_port": 9200},
+        {"id": "neo4j", "name": "Neo4j", "aliases": [],
+         "needs_host": True, "default_port": 7687},
+    ]
+
     @staticmethod
     def build_connection_string(
         db_type: str,
@@ -22,14 +50,23 @@ class SchemaExtractor:
         database: str
     ) -> str:
         """Build database connection string"""
-        
-        if db_type.lower() == "postgres":
-            # Use SSL mode for Postgres (required for cloud services like Neon)
-            return f"postgresql://{username}:{password}@{host}:{port}/{database}?sslmode=require"
-        elif db_type.lower() == "mysql":
+        dt = db_type.lower()
+        if dt in ("postgres", "postgresql"):
+            return f"postgresql://{username}:{password}@{host}:{port}/{database}"
+        elif dt == "mysql":
             return f"mysql+pymysql://{username}:{password}@{host}:{port}/{database}"
-        elif db_type.lower() == "sqlserver":
+        elif dt in ("sqlserver", "mssql"):
             return f"mssql+pyodbc://{username}:{password}@{host}:{port}/{database}?driver=ODBC+Driver+17+for+SQL+Server"
+        elif dt == "sqlite":
+            return f"sqlite:///{database}"
+        elif dt == "duckdb":
+            return f"duckdb:///{database}"
+        elif dt == "snowflake":
+            return f"snowflake://{username}:{password}@{host}/{database}"
+        elif dt in ("bigquery", "bq"):
+            return f"bigquery://{database}"
+        elif dt == "redshift":
+            return f"postgresql://{username}:{password}@{host}:{port}/{database}"
         else:
             raise ValueError(f"Unsupported database type: {db_type}")
     
@@ -69,12 +106,18 @@ class SchemaExtractor:
             logger.info(f"Connecting to {db_type} at {host}:{port}/{database}")
             logger.info(f"Connection string: {conn_string.split('@')[0]}@[hidden]")
             
-            # Create engine with appropriate timeout based on DB type
+            dt = db_type.lower()
             connect_args = {}
-            if db_type.lower() == "postgres":
+            if dt in ("postgres", "postgresql"):
                 connect_args = {"connect_timeout": timeout}
-            else:
+            elif dt == "sqlite":
                 connect_args = {"timeout": timeout}
+            elif dt == "duckdb":
+                connect_args = {}
+            elif dt in ("sqlserver", "mssql"):
+                connect_args = {"timeout": timeout}
+            else:
+                connect_args = {"connect_timeout": timeout}
             
             logger.info(f"Creating engine with connect_args: {connect_args}")
             engine = create_engine(
@@ -124,13 +167,15 @@ class SchemaExtractor:
             
             logger.info(f"Processing table: {table_name}")
             columns = inspector.get_columns(table_name)
+            pk_constraint = inspector.get_pk_constraint(table_name) or {}
+            pk_columns = set(pk_constraint.get("constrained_columns") or [])
             
             column_list = [
                 {
                     "name": col["name"],
                     "type": str(col["type"]),
                     "nullable": col.get("nullable", True),
-                    "primary_key": col.get("primary_key", False)
+                    "primary_key": col["name"] in pk_columns
                 }
                 for col in columns
             ]
@@ -152,3 +197,55 @@ class SchemaExtractor:
         
         logger.info(f"_do_extract completed, returning {len(schema_data['tables'])} tables")
         return schema_data
+
+    @staticmethod
+    def get_foreign_keys(engine) -> Dict[str, Dict[str, Dict]]:
+        """
+        Extract foreign key constraints from database using SQLAlchemy inspector.
+        
+        Returns:
+        {
+            "table_name": {
+                "column_name": {
+                    "references_table": "ref_table",
+                    "references_column": "ref_column",
+                    "constraint_name": "fk_name"
+                }
+            }
+        }
+        
+        Works on: PostgreSQL, MySQL (8.0+), SQL Server
+        """
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+        
+        fk_map = {}
+        
+        for table_name in tables:
+            # Skip system tables
+            if table_name.startswith('pg_') or table_name.startswith('information_schema'):
+                continue
+            
+            try:
+                fks = inspector.get_foreign_keys(table_name)
+                if fks:
+                    fk_map[table_name] = {}
+                    for fk in fks:
+                        # fk structure: {
+                        #     'name': 'constraint_name',
+                        #     'constrained_columns': ['column_name'],
+                        #     'referred_schema': 'schema',
+                        #     'referred_table': 'ref_table',
+                        #     'referred_columns': ['ref_column']
+                        # }
+                        for col, ref_col in zip(fk['constrained_columns'], fk['referred_columns']):
+                            fk_map[table_name][col] = {
+                                "references_table": fk['referred_table'],
+                                "references_column": ref_col,
+                                "constraint_name": fk.get('name', '')
+                            }
+            except Exception as e:
+                logger.warning(f"Could not extract FKs for {table_name}: {e}")
+        
+        logger.info(f"Extracted FKs for {len(fk_map)} tables")
+        return fk_map

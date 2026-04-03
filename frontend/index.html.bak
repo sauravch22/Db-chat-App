@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DbChat - Interactive SQL & Visualization</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
+    <script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
+    <script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
+    <style>
+        .spinner {
+            border: 4px solid #f3f4f6;
+            border-top: 4px solid #3b82f6;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .chart-container {
+            position: relative;
+            width: 100%;
+            height: 400px;
+            margin-bottom: 30px;
+        }
+        .json-display {
+            background: #1f2937;
+            color: #10b981;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            overflow-x: auto;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .stat-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .tab-button {
+            padding: 12px 24px;
+            border: none;
+            background: #e5e7eb;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.3s;
+        }
+        .tab-button.active {
+            background: #3b82f6;
+            color: white;
+        }
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <div class="min-h-screen">
+        <!-- Header -->
+        <header class="bg-gradient-to-r from-blue-600 to-purple-600 text-white shadow-lg">
+            <div class="max-w-7xl mx-auto px-6 py-8">
+                <h1 class="text-4xl font-bold">DbChat</h1>
+                <p class="text-blue-100 mt-2">Interactive SQL Generation & Visualization</p>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="max-w-7xl mx-auto px-6 py-8">
+            <!-- Connection Settings -->
+            <div class="mb-8 bg-white rounded-lg shadow p-6">
+                <h2 class="text-xl font-bold mb-4 flex items-center">
+                    <span class="w-8 h-8 bg-blue-600 text-white rounded-full flex items-center justify-center mr-3">⚙️</span>
+                    Configuration
+                </h2>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Connection ID</label>
+                        <input type="number" id="connectionId" value="3" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Chat Service</label>
+                        <input type="text" id="chatService" value="http://localhost:8000" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Viz Service</label>
+                        <input type="text" id="vizService" value="http://localhost:8001" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Query Input -->
+            <div class="mb-8 bg-white rounded-lg shadow p-6">
+                <h2 class="text-xl font-bold mb-4 flex items-center">
+                    <span class="w-8 h-8 bg-green-600 text-white rounded-full flex items-center justify-center mr-3">💬</span>
+                    Natural Language Query
+                </h2>
+                <div class="flex gap-4 mb-4">
+                    <input type="text" id="queryInput" placeholder="e.g., 'Show me sales by month' or 'Get all customers with their invoices'" class="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500" />
+                    <button onclick="generateSQL()" class="bg-green-600 hover:bg-green-700 text-white px-8 py-3 rounded-lg font-medium transition">
+                        Generate SQL
+                    </button>
+                </div>
+                <div id="loadingChat" class="hidden mb-4 flex items-center gap-3">
+                    <div class="spinner"></div>
+                    <span class="text-gray-600">Generating SQL...</span>
+                </div>
+            </div>
+
+            <!-- Tabs -->
+            <div class="mb-8 bg-white rounded-lg shadow overflow-hidden">
+                <div class="flex border-b">
+                    <button class="tab-button active" onclick="switchTab('sql')">📊 SQL & Results</button>
+                    <button class="tab-button" onclick="switchTab('visualization')">📈 Visualizations</button>
+                </div>
+
+                <!-- SQL Tab -->
+                <div id="tab-sql" class="tab-content active p-6">
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <!-- Generated SQL -->
+                        <div>
+                            <h3 class="text-lg font-bold mb-3">Generated SQL</h3>
+                            <div id="sqlOutput" class="json-display">
+                                <span class="text-gray-400">SQL will appear here...</span>
+                            </div>
+                            <button onclick="copySql()" class="mt-3 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm transition">
+                                📋 Copy SQL
+                            </button>
+                        </div>
+
+                        <!-- Results Summary -->
+                        <div>
+                            <h3 class="text-lg font-bold mb-3">Query Results</h3>
+                            <div id="resultsSummary" class="space-y-2">
+                                <p class="text-gray-500">Results will appear here...</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Raw Results -->
+                    <div class="mt-6">
+                        <h3 class="text-lg font-bold mb-3">Raw Results (JSON)</h3>
+                        <div id="rawResults" class="json-display">
+                            <span class="text-gray-400">Query results will appear here...</span>
+                        </div>
+                    </div>
+
+                    <!-- Execute Button -->
+                    <button onclick="executeQuery()" class="mt-6 bg-purple-600 hover:bg-purple-700 text-white px-8 py-3 rounded-lg font-medium transition">
+                        ▶️ Execute Query & Visualize
+                    </button>
+                    <div id="loadingExecution" class="hidden mt-4 flex items-center gap-3">
+                        <div class="spinner"></div>
+                        <span class="text-gray-600">Executing query and generating charts...</span>
+                    </div>
+                </div>
+
+                <!-- Visualization Tab -->
+                <div id="tab-visualization" class="tab-content p-6">
+                    <div id="chartsContainer">
+                        <p class="text-gray-500 text-center py-12">Run a query first to see visualizations</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Statistics -->
+            <div id="statsSection" class="hidden mb-8">
+                <h2 class="text-xl font-bold mb-4">Data Statistics</h2>
+                <div id="statsGrid" class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="app.js?v=2"></script>
+</body>
+</html>

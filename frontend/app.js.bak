@@ -1,0 +1,563 @@
+// State management
+let currentSQL = '';
+let currentResults = null;
+let currentCharts = [];
+
+// Get service endpoints
+function getChatService() {
+    return document.getElementById('chatService').value;
+}
+
+function getVizService() {
+    return document.getElementById('vizService').value;
+}
+
+function getConnectionId() {
+    return document.getElementById('connectionId').value;
+}
+
+// Tab switching
+function switchTab(tabName, evt = null) {
+    // Hide all tabs
+    document.querySelectorAll('.tab-content').forEach(tab => {
+        tab.classList.remove('active');
+    });
+    document.querySelectorAll('.tab-button').forEach(btn => {
+        btn.classList.remove('active');
+    });
+    
+    // Show selected tab
+    document.getElementById(`tab-${tabName}`).classList.add('active');
+    if (evt?.target) {
+        evt.target.classList.add('active');
+    } else {
+        const tabBtn = document.querySelector(`.tab-button[onclick*="switchTab('${tabName}'"]`);
+        if (tabBtn) tabBtn.classList.add('active');
+    }
+}
+
+// Generate SQL from natural language
+async function generateSQL() {
+    const query = document.getElementById('queryInput').value;
+    if (!query.trim()) {
+        alert('Please enter a query');
+        return;
+    }
+
+    const loadingChat = document.getElementById('loadingChat');
+    loadingChat.classList.remove('hidden');
+    
+    try {
+        const response = await fetch(`${getChatService()}/api/chat`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                connection_id: parseInt(getConnectionId()),
+                prompt: query
+            })
+        });
+
+        const data = await response.json();
+        
+        if (data.sql) {
+            currentSQL = data.sql;
+            document.getElementById('sqlOutput').textContent = formatSQL(data.sql);
+            
+            // Show summary
+            const summary = document.getElementById('resultsSummary');
+            const tables = data.selected_tables || data.table_names || [];
+            summary.innerHTML = `
+                <div class="space-y-2 text-sm">
+                    <p><span class="font-semibold">Status:</span> ${data.status || 'Generated'}</p>
+                    <p><span class="font-semibold">Query:</span> ${query}</p>
+                    ${tables.length ? `<p><span class="font-semibold">Tables:</span> ${tables.join(', ')}</p>` : ''}
+                    ${data.row_count != null ? `<p><span class="font-semibold">Rows:</span> ${data.row_count}</p>` : ''}
+                    ${data.answer ? `<p><span class="font-semibold">Answer:</span> ${data.answer}</p>` : ''}
+                </div>
+            `;
+
+            // If the response already includes rows, show them and auto-visualize
+            if (data.rows && data.rows.length > 0) {
+                // Store results for executeQuery compatibility
+                currentResults = {
+                    success: true,
+                    data: data.rows,
+                    columns: (data.columns || []).map(c => ({ name: c, type: 'VARCHAR' })),
+                    row_count: data.row_count || data.rows.length
+                };
+
+                // Display raw results
+                document.getElementById('rawResults').textContent = JSON.stringify(data.rows, null, 2);
+
+                // Infer column types from data for viz service
+                const colNames = data.columns || Object.keys(data.rows[0]);
+                const vizColumns = colNames.map(name => {
+                    const sample = data.rows.find(r => r[name] != null);
+                    const val = sample ? sample[name] : '';
+                    const isNumeric = typeof val === 'number' || (!isNaN(parseFloat(val)) && isFinite(val));
+                    return { name: name, type: isNumeric ? 'NUMERIC' : 'VARCHAR' };
+                });
+
+                // Convert string-numeric values to actual numbers for viz
+                const numericRows = data.rows.map(row => {
+                    const newRow = {};
+                    for (const [key, val] of Object.entries(row)) {
+                        if (typeof val === 'string' && !isNaN(parseFloat(val)) && isFinite(val)) {
+                            newRow[key] = parseFloat(val);
+                        } else {
+                            newRow[key] = val;
+                        }
+                    }
+                    return newRow;
+                });
+
+                // Call viz service
+                try {
+                    const vizPayload = {
+                        data: { columns: vizColumns, rows: numericRows },
+                        max_recommendations: 10
+                    };
+                    console.log('Viz request:', JSON.stringify(vizPayload).slice(0, 500));
+
+                    const vizResponse = await fetch(`${getVizService()}/analyze`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(vizPayload)
+                    });
+
+                    console.log('Viz response status:', vizResponse.status);
+
+                    if (vizResponse.ok) {
+                        const vizData = await vizResponse.json();
+                        console.log('Viz data:', vizData.status, 'recs:', vizData.recommendations?.length);
+                        if (vizData.status === 'success' && vizData.recommendations && vizData.recommendations.length > 0) {
+                            currentCharts = vizData.recommendations;
+                            renderCharts(vizData.recommendations);
+                            if (vizData.data_summary) renderStatistics(vizData.data_summary);
+                            switchTab('visualization');
+                        } else {
+                            console.warn('Viz returned no recommendations:', vizData);
+                        }
+                    } else {
+                        const errText = await vizResponse.text();
+                        console.error('Viz service error:', vizResponse.status, errText);
+                    }
+                } catch (vizError) {
+                    console.error('Viz service fetch failed:', vizError.message);
+                }
+            }
+        } else {
+            alert('Error: ' + (data.error || 'Could not generate SQL'));
+        }
+    } catch (error) {
+        alert('Error: ' + error.message);
+    } finally {
+        loadingChat.classList.add('hidden');
+    }
+}
+
+// Execute query and get visualizations
+async function executeQuery() {
+    if (!currentSQL) {
+        alert('Generate SQL first');
+        return;
+    }
+
+    const loadingExecution = document.getElementById('loadingExecution');
+    loadingExecution.classList.remove('hidden');
+    
+    try {
+        // Execute SQL via chat service
+        const chatResponse = await fetch(`${getChatService()}/api/chat/execute`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                connection_id: parseInt(getConnectionId()),
+                sql: currentSQL
+            })
+        });
+
+        if (!chatResponse.ok) {
+            const errorText = await chatResponse.text();
+            throw new Error(`Chat service failed (${chatResponse.status}): ${errorText.slice(0, 200)}`);
+        }
+
+        const results = await chatResponse.json();
+        
+        if (!results.success) {
+            alert('Query execution failed: ' + (results.error || 'Unknown error'));
+            loadingExecution.classList.add('hidden');
+            return;
+        }
+
+        currentResults = results;
+        
+        // Display raw results
+        document.getElementById('rawResults').textContent = JSON.stringify(results.data, null, 2);
+        
+        // Send to visualization service
+        const vizResponse = await fetch(`${getVizService()}/analyze`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                data: {
+                    columns: results.columns || [],
+                    rows: results.data || []
+                },
+                max_recommendations: 10
+            })
+        });
+
+        if (!vizResponse.ok) {
+            const errorText = await vizResponse.text();
+            throw new Error(`Viz service failed (${vizResponse.status}): ${errorText.slice(0, 200)}`);
+        }
+
+        const vizData = await vizResponse.json();
+        
+        if (vizData.status === 'success') {
+            currentCharts = vizData.recommendations;
+            renderCharts(vizData.recommendations);
+            renderStatistics(vizData.data_summary);
+            
+            // Switch to visualization tab
+            switchTab('visualization');
+        } else {
+            alert('Visualization failed: ' + (vizData.detail || 'Unknown error'));
+        }
+    } catch (error) {
+        alert('Error: ' + error.message + '\n\nCheck service URLs and whether ports 8000/8001 are running.');
+    } finally {
+        loadingExecution.classList.add('hidden');
+    }
+}
+
+// Render charts
+function renderCharts(recommendations) {
+    const container = document.getElementById('chartsContainer');
+    container.innerHTML = '';
+
+    recommendations.forEach((rec, index) => {
+        const chartDiv = document.createElement('div');
+        chartDiv.className = 'mb-12 bg-white p-6 rounded-lg shadow';
+        
+        const title = document.createElement('h3');
+        title.className = 'text-lg font-bold mb-2';
+        title.textContent = `${index + 1}. ${rec.title}`;
+        
+        const reason = document.createElement('p');
+        reason.className = 'text-gray-600 text-sm mb-4';
+        reason.textContent = rec.reason;
+        
+        const chartContainer = document.createElement('div');
+        chartContainer.id = `chart-${index}`;
+        chartContainer.className = 'chart-container';
+
+        chartDiv.appendChild(title);
+        chartDiv.appendChild(reason);
+        chartDiv.appendChild(chartContainer);
+        container.appendChild(chartDiv);
+
+        // Render based on chart type
+        renderChart(index, rec.chart_type, rec.config);
+    });
+}
+
+// Render individual chart
+async function renderChart(index, type, config) {
+    const chartId = `chart-${index}`;
+    
+    try {
+        if (type === 'bar') {
+            renderBarChart(chartId, config);
+        } else if (type === 'line') {
+            renderLineChart(chartId, config);
+        } else if (type === 'scatter') {
+            renderScatterChart(chartId, config);
+        } else if (type === 'pie') {
+            renderPieChart(chartId, config);
+        } else if (type === 'table') {
+            renderTable(chartId, config);
+        } else if (type === 'area') {
+            renderAreaChart(chartId, config);
+        } else {
+            document.getElementById(chartId).innerHTML = `<p class="text-gray-500">Chart type '${type}' not yet supported</p>`;
+        }
+    } catch (error) {
+        document.getElementById(chartId).innerHTML = `<p class="text-red-500">Error rendering chart: ${error.message}</p>`;
+    }
+}
+
+// Chart rendering functions using Chart.js
+function renderBarChart(chartId, config) {
+    const canvas = document.createElement('canvas');
+    document.getElementById(chartId).innerHTML = '';
+    document.getElementById(chartId).appendChild(canvas);
+    
+    const xField = config.x_field || config.y_field;
+    const yField = config.y_field || config.x_field;
+    
+    const labels = config.data.map(d => d[xField]);
+    const values = config.data.map(d => d[yField]);
+    
+    new Chart(canvas, {
+        type: 'bar',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: yField,
+                data: values,
+                backgroundColor: 'rgba(59, 130, 246, 0.6)',
+                borderColor: 'rgba(59, 130, 246, 1)',
+                borderWidth: 1
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: true }
+            },
+            scales: {
+                y: { beginAtZero: true }
+            }
+        }
+    });
+}
+
+function renderLineChart(chartId, config) {
+    const canvas = document.createElement('canvas');
+    document.getElementById(chartId).innerHTML = '';
+    document.getElementById(chartId).appendChild(canvas);
+    
+    const xField = config.x_field;
+    const yField = config.y_field;
+    
+    const labels = config.data.map(d => d[xField]);
+    const values = config.data.map(d => d[yField]);
+    
+    new Chart(canvas, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: yField,
+                data: values,
+                borderColor: 'rgba(139, 92, 246, 1)',
+                backgroundColor: 'rgba(139, 92, 246, 0.1)',
+                tension: 0.4,
+                fill: true
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: true } },
+            scales: { y: { beginAtZero: true } }
+        }
+    });
+}
+
+function renderAreaChart(chartId, config) {
+    const canvas = document.createElement('canvas');
+    document.getElementById(chartId).innerHTML = '';
+    document.getElementById(chartId).appendChild(canvas);
+    
+    const yField = config.y_field;
+    const values = config.data.map(d => d[yField]);
+    const indices = Array.from({length: values.length}, (_, i) => `Item ${i+1}`);
+    
+    new Chart(canvas, {
+        type: 'line',
+        data: {
+            labels: indices,
+            datasets: [{
+                label: yField,
+                data: values,
+                borderColor: 'rgba(16, 185, 129, 1)',
+                backgroundColor: 'rgba(16, 185, 129, 0.2)',
+                tension: 0.4,
+                fill: true
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: true } }
+        }
+    });
+}
+
+function renderScatterChart(chartId, config) {
+    const canvas = document.createElement('canvas');
+    document.getElementById(chartId).innerHTML = '';
+    document.getElementById(chartId).appendChild(canvas);
+    
+    const xField = config.x_field;
+    const yField = config.y_field;
+    
+    const data = config.data.map(d => ({
+        x: d[xField],
+        y: d[yField]
+    }));
+    
+    new Chart(canvas, {
+        type: 'scatter',
+        data: {
+            datasets: [{
+                label: `${xField} vs ${yField}`,
+                data: data,
+                backgroundColor: 'rgba(236, 72, 153, 0.6)',
+                borderColor: 'rgba(236, 72, 153, 1)',
+                borderWidth: 1
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: true } },
+            scales: {
+                x: { title: { display: true, text: xField } },
+                y: { title: { display: true, text: yField } }
+            }
+        }
+    });
+}
+
+function renderPieChart(chartId, config) {
+    const canvas = document.createElement('canvas');
+    document.getElementById(chartId).innerHTML = '';
+    document.getElementById(chartId).appendChild(canvas);
+    
+    const categoryField = config.category_field;
+    const valueField = config.value_field;
+    
+    const labels = config.data.map(d => d[categoryField]);
+    const values = config.data.map(d => d[valueField]);
+    
+    const colors = [
+        'rgba(255, 99, 132, 0.7)',
+        'rgba(54, 162, 235, 0.7)',
+        'rgba(255, 206, 86, 0.7)',
+        'rgba(75, 192, 192, 0.7)',
+        'rgba(153, 102, 255, 0.7)',
+        'rgba(255, 159, 64, 0.7)'
+    ];
+    
+    new Chart(canvas, {
+        type: 'pie',
+        data: {
+            labels: labels,
+            datasets: [{
+                data: values,
+                backgroundColor: colors.slice(0, labels.length)
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: true } }
+        }
+    });
+}
+
+function renderTable(chartId, config) {
+    const container = document.getElementById(chartId);
+    container.style.position = 'static';
+    container.style.height = 'auto';
+    
+    const table = document.createElement('table');
+    table.className = 'w-full border-collapse text-sm';
+    
+    // Headers
+    const headerRow = document.createElement('tr');
+    headerRow.className = 'bg-gray-200';
+    config.columns.forEach(col => {
+        const th = document.createElement('th');
+        th.className = 'border border-gray-300 px-4 py-2 text-left font-semibold';
+        th.textContent = col;
+        headerRow.appendChild(th);
+    });
+    table.appendChild(headerRow);
+    
+    // Data rows
+    config.data.slice(0, 10).forEach(row => {
+        const tr = document.createElement('tr');
+        tr.className = 'hover:bg-gray-50';
+        config.columns.forEach(col => {
+            const td = document.createElement('td');
+            td.className = 'border border-gray-300 px-4 py-2';
+            td.textContent = row[col] || '';
+            tr.appendChild(td);
+        });
+        table.appendChild(tr);
+    });
+    
+    if (config.data.length > 10) {
+        const footerRow = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = config.columns.length;
+        td.className = 'border border-gray-300 px-4 py-2 text-center text-gray-600';
+        td.textContent = `... and ${config.data.length - 10} more rows`;
+        footerRow.appendChild(td);
+        table.appendChild(footerRow);
+    }
+    
+    container.innerHTML = '';
+    container.appendChild(table);
+}
+
+// Render statistics
+function renderStatistics(summary) {
+    const statsGrid = document.getElementById('statsGrid');
+    const statsSection = document.getElementById('statsSection');
+    
+    const stats = [
+        { label: 'Columns', value: summary.column_count },
+        { label: 'Rows', value: summary.row_count },
+        { label: 'Numeric', value: summary.numeric_columns.length },
+        { label: 'Categories', value: summary.category_columns.length }
+    ];
+    
+    statsGrid.innerHTML = stats.map(stat => `
+        <div class="stat-card">
+            <p class="text-4xl font-bold">${stat.value}</p>
+            <p class="text-sm mt-2">${stat.label}</p>
+        </div>
+    `).join('');
+    
+    statsSection.classList.remove('hidden');
+}
+
+// Format SQL for display
+function formatSQL(sql) {
+    return sql
+        .replace(/SELECT/g, '\nSELECT')
+        .replace(/FROM/g, '\nFROM')
+        .replace(/WHERE/g, '\nWHERE')
+        .replace(/JOIN/g, '\nJOIN')
+        .replace(/GROUP BY/g, '\nGROUP BY')
+        .replace(/ORDER BY/g, '\nORDER BY');
+}
+
+// Copy SQL to clipboard
+function copySql() {
+    if (!currentSQL) {
+        alert('No SQL to copy');
+        return;
+    }
+    navigator.clipboard.writeText(currentSQL);
+    alert('SQL copied to clipboard!');
+}
+
+// Example queries
+function setExampleQuery(query) {
+    document.getElementById('queryInput').value = query;
+    generateSQL();
+}

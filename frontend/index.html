@@ -1,0 +1,1294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DbChat — Talk to your Database</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- CodeMirror 6 — lightweight SQL editor -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/theme/material-darker.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/sql/sql.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/addon/hint/show-hint.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/addon/hint/sql-hint.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/addon/hint/show-hint.min.css">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        d: {
+                            bg: '#0b0d11', card: '#13161d', input: '#1b1e27',
+                            border: '#252938', hover: '#2a2f40', accent: '#7c6eff',
+                            accentH: '#6a5be0', text: '#dfe1e8', muted: '#6b7084',
+                            green: '#34d399', red: '#f87171', surface: '#171a23',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        *{box-sizing:border-box}
+        body{background:#0b0d11;color:#dfe1e8;font-family:Inter,-apple-system,BlinkMacSystemFont,sans-serif;margin:0}
+        ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:#13161d}::-webkit-scrollbar-thumb{background:#363b50;border-radius:3px}
+        #chatArea{scroll-behavior:smooth}
+        .typing-dot{animation:tBounce 1.4s infinite ease-in-out both}
+        .typing-dot:nth-child(1){animation-delay:-.32s}.typing-dot:nth-child(2){animation-delay:-.16s}
+        @keyframes tBounce{0%,80%,100%{transform:scale(0)}40%{transform:scale(1)}}
+        .msg-in{animation:slideUp .25s ease-out}
+        @keyframes slideUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+        .sql-block{background:#10121a;border:1px solid #252938;border-radius:8px;font-family:'JetBrains Mono','Fira Code',monospace;font-size:12.5px;line-height:1.65;color:#a5b4fc;padding:14px 16px;overflow-x:auto;white-space:pre-wrap;word-break:break-word}
+        .dt{border-collapse:collapse;width:100%;font-size:12.5px}
+        .dt th{background:#171a23;color:#a5b4fc;padding:9px 12px;text-align:left;font-weight:600;text-transform:uppercase;font-size:10.5px;letter-spacing:.5px;border-bottom:2px solid #252938;position:sticky;top:0;z-index:1}
+        .dt td{padding:7px 12px;border-bottom:1px solid #1a1d28;color:#bfc4d8}
+        .dt tr:hover td{background:#161922}
+        .dt .num{text-align:right;font-variant-numeric:tabular-nums}
+        .user-msg{background:#7c6eff;color:#fff;border-radius:16px 16px 4px 16px;padding:10px 16px;max-width:70%;font-size:14px;line-height:1.5}
+        .bot-msg{background:#13161d;border:1px solid #252938;border-radius:4px 16px 16px 16px;padding:16px 20px}
+        .chip{font-size:11.5px;background:#1b1e27;border:1px solid #252938;border-radius:8px;padding:5px 12px;color:#6b7084;cursor:pointer;transition:all .15s}
+        .chip:hover{color:#dfe1e8;border-color:#7c6eff;background:#1f2330}
+        .chart-chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;background:#1b1e27;border:1px solid #252938;border-radius:8px;padding:6px 14px;color:#a5b4fc;cursor:pointer;transition:all .15s}
+        .chart-chip:hover{border-color:#7c6eff;background:#1f2330;color:#c4b5fd}
+        .chart-chip svg{width:14px;height:14px}
+        .toggle-hdr{cursor:pointer;user-select:none;display:flex;align-items:center;gap:6px;font-size:12px;color:#6b7084;transition:color .15s}
+        .toggle-hdr:hover{color:#dfe1e8}
+        .toggle-hdr .arr{transition:transform .2s;display:inline-block;font-size:10px}
+        .toggle-hdr.open .arr{transform:rotate(90deg)}
+        .collapse-body{overflow:hidden;transition:max-height .25s ease,opacity .2s;max-height:0;opacity:0}
+        .collapse-body.show{opacity:1}
+
+        /* ─── Modal / Dialog ─── */
+        .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .2s}
+        .modal-overlay.open{opacity:1;pointer-events:auto}
+        .modal-box{background:#13161d;border:1px solid #252938;border-radius:14px;width:92vw;max-width:960px;max-height:88vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+        .modal-header{display:flex;align-items:center;justify-content:between;padding:16px 20px;border-bottom:1px solid #252938;gap:12px;shrink:0}
+        .modal-body{flex:1;overflow:auto;padding:20px}
+        .modal-close{background:none;border:1px solid #252938;border-radius:8px;color:#6b7084;width:32px;height:32px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:16px;transition:all .15s;margin-left:auto}
+        .modal-close:hover{color:#dfe1e8;border-color:#7c6eff}
+
+        /* Detail explorer */
+        .search-input{background:#1b1e27;border:1px solid #252938;border-radius:8px;padding:8px 12px;font-size:13px;color:#dfe1e8;outline:none;width:100%;transition:border-color .15s}
+        .search-input:focus{border-color:#7c6eff}
+        .search-input::placeholder{color:#4a4f65}
+        .col-select{background:#1b1e27;border:1px solid #252938;border-radius:8px;padding:8px 12px;font-size:13px;color:#dfe1e8;outline:none;appearance:none;cursor:pointer}
+        .col-select:focus{border-color:#7c6eff}
+        .match-hl{background:rgba(124,110,255,.3);border-radius:2px;padding:0 1px}
+        .regex-err{color:#f87171;font-size:11px;margin-top:4px}
+
+        /* ─── Login screen ─── */
+        #loginScreen{position:fixed;inset:0;z-index:200;background:#0b0d11;display:flex;align-items:center;justify-content:center;transition:opacity .3s}
+        #loginScreen.hidden{opacity:0;pointer-events:none;display:none}
+        .login-card{background:#13161d;border:1px solid #252938;border-radius:16px;padding:40px 36px 36px;width:380px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+        .login-card h2{font-size:20px;font-weight:700;color:#fff;margin:0 0 4px}
+        .login-card p{font-size:13px;color:#6b7084;margin:0 0 24px}
+        .login-card label{display:block;font-size:12px;color:#8b8fa3;margin-bottom:5px;font-weight:500}
+        .login-card input{width:100%;background:#1b1e27;border:1px solid #252938;border-radius:10px;padding:10px 14px;font-size:14px;color:#dfe1e8;outline:none;transition:border-color .15s;margin-bottom:16px}
+        .login-card input:focus{border-color:#7c6eff}
+        .login-card input::placeholder{color:#4a4f65}
+        .login-btn{width:100%;background:#7c6eff;color:#fff;border:none;border-radius:10px;padding:11px;font-size:14px;font-weight:600;cursor:pointer;transition:background .15s}
+        .login-btn:hover{background:#6a5be0}
+        .login-btn:disabled{opacity:.5;cursor:not-allowed}
+        .login-err{color:#f87171;font-size:12px;margin-top:10px;text-align:center;min-height:18px}
+
+        /* ─── Permission badge ─── */
+        .perm-badge{font-size:10px;padding:2px 8px;border-radius:4px;font-weight:600;text-transform:uppercase;letter-spacing:.3px}
+        .perm-badge.onboard{background:rgba(52,211,153,.15);color:#34d399}
+        .perm-badge.reindex{background:rgba(251,191,36,.15);color:#fbbf24}
+        .perm-badge.query{background:rgba(124,110,255,.15);color:#a78bfa}
+
+        /* ─── Auth toggle link ─── */
+        .auth-toggle{color:#7c6eff;cursor:pointer;font-size:13px;text-align:center;margin-top:16px}
+        .auth-toggle:hover{text-decoration:underline}
+
+        /* ─── Admin panel ─── */
+        .tab-bar{display:flex;border-bottom:1px solid #252938;background:#0f1117}
+        .tab-btn{padding:10px 20px;font-size:13px;font-weight:600;color:#6b7084;cursor:pointer;border:none;background:none;border-bottom:2px solid transparent;transition:all .15s}
+        .tab-btn:hover{color:#dfe1e8}
+        .tab-btn.active{color:#7c6eff;border-bottom-color:#7c6eff}
+        .admin-panel{background:#0f1117;border:1px solid #252938;border-radius:12px;overflow:hidden;margin-top:8px}
+        .user-row{display:flex;align-items:center;gap:16px;padding:12px 20px;border-bottom:1px solid #1a1d28;transition:background .1s}
+        .user-row:hover{background:#13161d}
+        .user-row:last-child{border-bottom:none}
+        .perm-toggle{font-size:11px;padding:4px 12px;border-radius:6px;font-weight:600;cursor:pointer;border:1px solid transparent;transition:all .15s;text-transform:uppercase;letter-spacing:.3px}
+        .perm-toggle.on{opacity:1}
+        .perm-toggle.off{opacity:.35}
+        .perm-toggle.onboard.on{background:rgba(52,211,153,.15);color:#34d399;border-color:rgba(52,211,153,.3)}
+        .perm-toggle.onboard.off{background:transparent;color:#34d399;border-color:#252938}
+        .perm-toggle.reindex.on{background:rgba(251,191,36,.15);color:#fbbf24;border-color:rgba(251,191,36,.3)}
+        .perm-toggle.reindex.off{background:transparent;color:#fbbf24;border-color:#252938}
+        .perm-toggle.query.on{background:rgba(124,110,255,.15);color:#a78bfa;border-color:rgba(124,110,255,.3)}
+        .perm-toggle.query.off{background:transparent;color:#a78bfa;border-color:#252938}
+        .save-status{font-size:11px;color:#34d399;opacity:0;transition:opacity .3s}
+        .save-status.show{opacity:1}
+
+        /* ─── Activity log ─── */
+        .log-status{font-size:10px;padding:2px 8px;border-radius:4px;font-weight:600;text-transform:uppercase;letter-spacing:.3px}
+        .log-status.success{background:rgba(52,211,153,.12);color:#34d399}
+        .log-status.failed{background:rgba(248,113,113,.12);color:#f87171}
+        .log-status.denied{background:rgba(251,191,36,.12);color:#fbbf24}
+        .log-action{font-size:11px;font-family:'JetBrains Mono','Fira Code',monospace;color:#a5b4fc}
+        .log-detail{font-size:11px;color:#6b7084;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:default}
+        .log-detail:hover{white-space:normal;word-break:break-word}
+        .log-entry{display:grid;grid-template-columns:70px 80px 160px 65px 1fr 55px;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid #1a1d28;font-size:12px;transition:background .15s}
+        .log-entry:hover{background:rgba(255,255,255,.03)}
+        .log-time{color:#6b7084;font-size:11px}
+        .log-user{color:#e2e8f0;font-weight:500;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .log-dur{color:#6b7084;font-size:11px;text-align:right;font-family:'JetBrains Mono','Fira Code',monospace}
+        .log-entry-user{display:grid;grid-template-columns:70px 160px 65px 1fr 55px;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid #1a1d28;font-size:12px;transition:background .15s}
+        .log-entry-user:hover{background:rgba(255,255,255,.03)}
+        .scope-active{background:var(--accent)!important;color:#fff!important}
+        .scope-inactive{background:#13161d!important;color:#6b7084!important}
+        .stat-card{background:#13161d;border:1px solid #252938;border-radius:10px;padding:12px 16px;text-align:center;min-width:100px}
+        .stat-card .stat-val{font-size:20px;font-weight:700;color:#fff}
+        .stat-card .stat-lbl{font-size:10px;color:#6b7084;text-transform:uppercase;letter-spacing:.3px;margin-top:2px}
+
+        /* ─── Thread sidebar ─── */
+        .thread-item{display:flex;align-items:center;gap:6px;padding:8px 10px;border-radius:8px;cursor:pointer;transition:background .12s,border-color .12s;border:1px solid transparent;position:relative}
+        .thread-item:hover{background:#1b1e27}
+        .thread-item.active{background:rgba(124,110,255,.12);border-color:rgba(124,110,255,.35)}
+        .thread-item .thread-title{font-size:12px;color:#bfc4d8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;line-height:1.3}
+        .thread-item.active .thread-title{color:#dfe1e8;font-weight:600}
+        .thread-item .thread-meta{font-size:10px;color:#4a4f65;white-space:nowrap}
+        .thread-item .thread-del{display:none;position:absolute;right:6px;top:50%;transform:translateY(-50%);background:#1b1e27;border:1px solid #252938;border-radius:4px;color:#6b7084;font-size:10px;padding:1px 5px;cursor:pointer}
+        .thread-item:hover .thread-del{display:block}
+        .thread-item .thread-del:hover{color:#f87171;border-color:#f87171}
+
+        /* ─── Pagination controls ─── */
+        .page-controls{display:flex;align-items:center;justify-content:center;gap:6px;margin-top:8px}
+        .page-btn{font-size:11px;padding:4px 10px;border-radius:6px;border:1px solid #252938;background:#1b1e27;color:#6b7084;cursor:pointer;transition:all .15s}
+        .page-btn:hover:not(:disabled){color:#dfe1e8;border-color:#7c6eff;background:#1f2330}
+        .page-btn:disabled{opacity:.3;cursor:not-allowed}
+        .page-btn.active{background:rgba(124,110,255,.2);color:#a78bfa;border-color:#7c6eff;font-weight:600}
+        .page-info{font-size:11px;color:#6b7084}
+
+        /* ─── Export buttons ─── */
+        .export-btn{display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:4px 10px;border-radius:6px;border:1px solid #252938;background:#1b1e27;color:#34d399;cursor:pointer;transition:all .15s}
+        .export-btn:hover{border-color:#34d399;background:#1f2330;color:#6ee7b7}
+
+        /* ─── Saved Queries ─── */
+        .sq-card{background:#13161d;border:1px solid #252938;border-radius:10px;padding:14px 16px;transition:border-color .15s;cursor:pointer}
+        .sq-card:hover{border-color:#7c6eff}
+        .sq-fav{color:#4a4f65;cursor:pointer;transition:color .15s;font-size:16px}
+        .sq-fav:hover,.sq-fav.on{color:#fbbf24}
+        .sq-folder-badge{font-size:10px;padding:2px 8px;border-radius:4px;background:rgba(124,110,255,.12);color:#a78bfa;font-weight:500}
+
+        /* ─── CodeMirror dark theme overrides ─── */
+        .CodeMirror{background:#10121a !important;color:#a5b4fc !important;font-family:'JetBrains Mono','Fira Code',monospace !important;font-size:12.5px !important;border:1px solid #252938;border-radius:8px;height:auto;min-height:80px}
+        .CodeMirror-gutters{background:#0d0f14 !important;border-right:1px solid #252938 !important}
+        .CodeMirror-linenumber{color:#4a4f65 !important}
+        .CodeMirror-cursor{border-color:#7c6eff !important}
+        .CodeMirror-selected{background:rgba(124,110,255,.2) !important}
+        .CodeMirror-focused .CodeMirror-selected{background:rgba(124,110,255,.3) !important}
+        .cm-s-material-darker .cm-keyword{color:#c792ea !important}
+        .cm-s-material-darker .cm-string{color:#c3e88d !important}
+        .cm-s-material-darker .cm-number{color:#f78c6c !important}
+        .cm-s-material-darker .cm-comment{color:#546e7a !important}
+        .CodeMirror-hints{background:#13161d !important;border:1px solid #252938 !important;border-radius:8px !important}
+        .CodeMirror-hint{color:#dfe1e8 !important}
+        .CodeMirror-hint-active{background:rgba(124,110,255,.2) !important;color:#fff !important}
+
+        /* ─── SSE streaming indicator ─── */
+        .stream-dot{display:inline-block;width:6px;height:6px;background:#7c6eff;border-radius:50%;animation:streamPulse 1s infinite}
+        @keyframes streamPulse{0%,100%{opacity:.3}50%{opacity:1}}
+        .summary-card{background:#0f1117;border:1px solid #1f2937;border-radius:10px;padding:12px 16px;margin-top:8px}
+        .summary-card h5{font-size:11px;font-weight:600;color:#7c6eff;text-transform:uppercase;letter-spacing:.3px;margin-bottom:6px}
+        .summary-card p{font-size:12.5px;line-height:1.6;color:#bfc4d8;margin:0}
+    </style>
+</head>
+<body class="h-screen flex flex-col overflow-hidden">
+
+    <!-- ═══════════ LOGIN / SIGNUP SCREEN ═══════════ -->
+    <div id="loginScreen">
+        <div class="login-card">
+            <div class="flex items-center gap-3 mb-5">
+                <div class="w-10 h-10 rounded-xl bg-d-accent flex items-center justify-center text-white font-bold text-base">DB</div>
+                <div><h2>DbChat</h2><p style="margin:0" id="authSubtitle">Sign in to continue</p></div>
+            </div>
+
+            <!-- Sign In form -->
+            <div id="signinForm">
+                <label for="loginUser">Username</label>
+                <input id="loginUser" type="text" placeholder="Enter username" autocomplete="username" autofocus
+                       onkeydown="if(event.key==='Enter')document.getElementById('loginPass').focus()">
+                <label for="loginPass">Password</label>
+                <input id="loginPass" type="password" placeholder="Enter password" autocomplete="current-password"
+                       onkeydown="if(event.key==='Enter')doLogin()">
+                <button id="loginBtn" class="login-btn" onclick="doLogin()">Sign In</button>
+                <div id="loginError" class="login-err"></div>
+                <div class="auth-toggle" onclick="showSignupForm()">Don't have an account? <strong>Sign Up</strong></div>
+            </div>
+
+            <!-- Sign Up form (hidden by default) -->
+            <div id="signupForm" style="display:none">
+                <label for="signupUser">Username</label>
+                <input id="signupUser" type="text" placeholder="Choose a username" autocomplete="username"
+                       onkeydown="if(event.key==='Enter')document.getElementById('signupPass').focus()">
+                <label for="signupPass">Password</label>
+                <input id="signupPass" type="password" placeholder="Choose a password" autocomplete="new-password"
+                       onkeydown="if(event.key==='Enter')document.getElementById('signupPass2').focus()">
+                <label for="signupPass2">Confirm Password</label>
+                <input id="signupPass2" type="password" placeholder="Confirm password" autocomplete="new-password"
+                       onkeydown="if(event.key==='Enter')doSignup()">
+                <button id="signupBtn" class="login-btn" onclick="doSignup()">Create Account</button>
+                <div id="signupError" class="login-err"></div>
+                <div id="signupSuccess" class="login-err" style="color:#34d399"></div>
+                <div class="auth-toggle" onclick="showSigninForm()">Already have an account? <strong>Sign In</strong></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══════════ MAIN APP (hidden until login) ═══════════ -->
+    <div id="appShell" class="h-screen flex flex-col overflow-hidden" style="display:none">
+
+        <!-- Top Bar -->
+        <header class="flex items-center justify-between px-5 py-2.5 border-b border-d-border bg-d-card shrink-0">
+            <div class="flex items-center gap-3">
+                <div class="w-8 h-8 rounded-lg bg-d-accent flex items-center justify-center text-white font-bold text-sm">DB</div>
+                <div><h1 class="text-sm font-semibold text-white leading-tight">DbChat</h1><p class="text-[11px] text-d-muted">Natural language SQL assistant</p></div>
+            </div>
+            <div class="flex items-center gap-4">
+                <div class="flex items-center gap-2 bg-d-input border border-d-border rounded-lg px-3 py-1.5">
+                    <div class="w-2 h-2 rounded-full bg-d-green" style="animation:pulse 2s infinite"></div>
+                    <select id="dbSelector" class="bg-transparent text-sm text-d-text outline-none cursor-pointer appearance-none pr-5" style="background-image:url('data:image/svg+xml;charset=US-ASCII,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2212%22 height=%2212%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22%236b7084%22 stroke-width=%222%22%3E%3Cpolyline points=%226 9 12 15 18 9%22/%3E%3C/svg%3E');background-repeat:no-repeat;background-position:right 0 center"><option value="">Loading…</option></select>
+                </div>
+                <!-- User menu -->
+                <div class="flex items-center gap-2">
+                    <span id="userLabel" class="text-xs text-d-muted"></span>
+                    <div id="userPerms" class="flex gap-1"></div>
+                    <button onclick="doLogout()" class="text-xs text-d-muted hover:text-d-red border border-d-border rounded-lg px-3 py-1.5 transition" title="Sign out">Logout</button>
+                </div>
+            </div>
+            <input type="hidden" id="chatUrl" value="">
+            <input type="hidden" id="vizUrl" value="http://localhost:8001">
+        </header>
+
+        <!-- Tab bar -->
+        <div id="tabBar" class="tab-bar" style="overflow-x:auto;white-space:nowrap">
+            <button class="tab-btn active" onclick="switchTab('chat')" id="tabChat">💬 Chat</button>
+            <button class="tab-btn" onclick="switchTab('schema')" id="tabSchema">🗂 Schema</button>
+            <button class="tab-btn" onclick="switchTab('workbench')" id="tabWorkbench">⚡ Workbench</button>
+            <button class="tab-btn" onclick="switchTab('saved')" id="tabSaved">⭐ Saved</button>
+            <button class="tab-btn" onclick="switchTab('dashboard')" id="tabDashboard">📊 Dashboards</button>
+            <button class="tab-btn" onclick="switchTab('lineage')" id="tabLineage">🔗 Lineage</button>
+            <button class="tab-btn" onclick="switchTab('intelligence')" id="tabIntelligence">📈 Intelligence</button>
+            <button class="tab-btn" onclick="switchTab('templates')" id="tabTemplates">📋 Templates</button>
+            <button class="tab-btn" onclick="switchTab('crossdb')" id="tabCrossDb">🔀 Cross-DB</button>
+            <button class="tab-btn" onclick="switchTab('erd')" id="tabErd">🗺 ERD</button>
+            <button class="tab-btn" onclick="switchTab('quality')" id="tabQuality">✅ Quality</button>
+            <button class="tab-btn" onclick="switchTab('optimizer')" id="tabOptimizer">⚡ Optimizer</button>
+            <button class="tab-btn" onclick="switchTab('training')" id="tabTraining">🧠 Training</button>
+            <button class="tab-btn" onclick="switchTab('fileupload')" id="tabFileUpload">📁 Files</button>
+            <button class="tab-btn" onclick="switchTab('pipeline')" id="tabPipeline">🔄 Pipeline</button>
+            <button class="tab-btn" onclick="switchTab('apigen')" id="tabApiGen">🔌 API</button>
+            <button class="tab-btn" onclick="switchTab('migration')" id="tabMigration">🏗 Migrate</button>
+            <button class="tab-btn" onclick="switchTab('embed')" id="tabEmbed">🧩 Embed</button>
+            <button class="tab-btn" onclick="switchTab('admin')" id="tabAdmin" style="display:none">👥 Admin</button>
+            <button class="tab-btn" onclick="switchTab('activity')" id="tabActivity">📋 Activity</button>
+        </div>
+
+        <!-- Chat Tab -->
+        <div id="chatTab" class="flex flex-1 overflow-hidden">
+
+        <!-- Thread Sidebar -->
+        <aside id="threadSidebar" class="flex flex-col border-r border-d-border bg-d-surface shrink-0 overflow-hidden" style="width:230px">
+            <div class="p-3 border-b border-d-border flex items-center gap-2">
+                <button onclick="startNewThread()" class="flex-1 text-xs font-semibold py-2 rounded-lg bg-d-accent text-white hover:bg-d-accentH transition" style="letter-spacing:.3px">＋ New Thread</button>
+                <button onclick="openHistorySearch()" class="text-xs text-d-muted hover:text-white border border-d-border rounded-lg px-2 py-2 transition" title="Search history">🔍</button>
+            </div>
+            <!-- F1: History search panel -->
+            <div id="historySearchPanel" class="border-b border-d-border" style="display:none;max-height:300px;overflow:hidden">
+                <div class="p-2">
+                    <input id="historySearchInput" class="search-input" placeholder="Search queries…" oninput="debounceHistorySearch()" style="font-size:11px;padding:6px 10px">
+                </div>
+                <div id="historySearchResults" class="overflow-y-auto" style="max-height:240px"></div>
+            </div>
+            <div id="threadList" class="flex-1 overflow-y-auto p-2 space-y-0.5">
+                <p class="text-[11px] text-d-muted p-3 text-center">No threads yet</p>
+            </div>
+        </aside>
+
+        <!-- Main Chat Column -->
+        <div class="flex flex-col flex-1 overflow-hidden">
+        <!-- Chat -->
+        <main id="chatArea" class="flex-1 overflow-y-auto px-4 py-5">
+            <div id="messages" class="max-w-5xl mx-auto space-y-5">
+                <div class="msg-in flex gap-3">
+                    <div class="w-8 h-8 rounded-lg bg-d-accent flex items-center justify-center text-white text-xs font-bold shrink-0 mt-1">DB</div>
+                    <div class="bot-msg" id="welcomeMsg"><p class="text-sm">👋 Hi! I'm <strong>DbChat</strong> — loading your database overview…</p>
+                        <div class="flex items-center gap-2 mt-3">
+                            <div class="typing-dot w-2 h-2 bg-d-muted rounded-full"></div>
+                            <div class="typing-dot w-2 h-2 bg-d-muted rounded-full"></div>
+                            <div class="typing-dot w-2 h-2 bg-d-muted rounded-full"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div id="typing" class="hidden max-w-5xl mx-auto mt-4"><div class="flex gap-3"><div class="w-8 h-8 rounded-lg bg-d-accent flex items-center justify-center text-white text-xs font-bold shrink-0">DB</div><div class="bot-msg py-3 px-4"><div class="flex gap-1.5 items-center h-5"><div class="typing-dot w-2 h-2 bg-d-muted rounded-full"></div><div class="typing-dot w-2 h-2 bg-d-muted rounded-full"></div><div class="typing-dot w-2 h-2 bg-d-muted rounded-full"></div></div></div></div></div>
+        </main>
+
+        <!-- F4: Suggestions bar -->
+        <div id="suggestionsBar"></div>
+        <!-- F3: Validation panel -->
+        <div id="validationPanel" style="display:none" class="px-4 py-1 max-w-5xl mx-auto"></div>
+        <!-- Input -->
+        <footer class="shrink-0 border-t border-d-border bg-d-card px-4 py-3">
+            <div class="max-w-5xl mx-auto flex gap-3 items-end">
+                <textarea id="queryInput" rows="1" placeholder="Ask about your data…" class="flex-1 bg-d-input border border-d-border rounded-xl px-4 py-3 text-sm text-d-text placeholder-d-muted outline-none resize-none focus:border-d-accent transition" style="max-height:120px" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage()}"></textarea>
+                <button id="sendBtn" onclick="sendMessage()" class="bg-d-accent hover:bg-d-accentH text-white rounded-xl px-5 py-3 text-sm font-medium transition shrink-0 disabled:opacity-40 disabled:cursor-not-allowed">Send ➤</button>
+            </div>
+            <p class="max-w-5xl mx-auto text-[10px] text-d-muted mt-1.5 text-center">DbChat generates SQL from your questions · Always review generated queries</p>
+        </footer>
+        </div><!-- /main chat column -->
+        </div><!-- /chatTab -->
+
+        <!-- Admin Tab (hidden by default) -->
+        <div id="adminTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-4xl mx-auto">
+                <!-- Onboard / Register Database -->
+                <div id="adminOnboardSection" class="bg-d-card border border-d-border rounded-xl p-4 mb-6">
+                    <div class="flex items-center justify-between mb-3">
+                        <div>
+                            <h2 class="text-sm font-semibold text-white">Onboard New Database</h2>
+                            <p class="text-xs text-d-muted mt-1">Register a new database connection. Schema extraction and indexing run automatically in the background.</p>
+                        </div>
+                    </div>
+                    <div class="grid md:grid-cols-2 gap-3">
+                        <div>
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Display Name</label>
+                            <input id="adminRegName" class="search-input" placeholder="e.g. Chinook (Neon)" />
+                        </div>
+                        <div>
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Database Type</label>
+                            <select id="adminRegType" class="col-select" onchange="onDbTypeChange()">
+                                <optgroup label="SQL Databases">
+                                    <option value="postgres" selected>PostgreSQL</option>
+                                    <option value="mysql">MySQL</option>
+                                    <option value="sqlserver">SQL Server</option>
+                                    <option value="sqlite">SQLite</option>
+                                    <option value="duckdb">DuckDB</option>
+                                    <option value="snowflake">Snowflake</option>
+                                    <option value="bigquery">BigQuery</option>
+                                    <option value="redshift">Redshift</option>
+                                </optgroup>
+                                <optgroup label="NoSQL Databases">
+                                    <option value="mongodb">MongoDB</option>
+                                    <option value="redis">Redis</option>
+                                    <option value="elasticsearch">Elasticsearch</option>
+                                    <option value="neo4j">Neo4j</option>
+                                </optgroup>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Host</label>
+                            <input id="adminRegHost" class="search-input" placeholder="e.g. ep-...aws.neon.tech" />
+                        </div>
+                        <div>
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Port</label>
+                            <input id="adminRegPort" class="search-input" placeholder="5432" value="5432" />
+                        </div>
+                        <div>
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Username</label>
+                            <input id="adminRegUser" class="search-input" placeholder="DB username" />
+                        </div>
+                        <div>
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Password</label>
+                            <input id="adminRegPass" type="password" class="search-input" placeholder="DB password" />
+                        </div>
+                        <div>
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Database Name</label>
+                            <input id="adminRegDb" class="search-input" placeholder="e.g. chinook" />
+                        </div>
+                    </div>
+                    <div class="mt-3 flex items-center justify-between">
+                        <span id="adminOnboardStatus" class="text-xs text-d-muted"></span>
+                        <button onclick="testConnection()" class="chip" style="background:rgba(52,211,153,.1);color:#34d399;border-color:rgba(52,211,153,.25)">🔌 Test Connection</button>
+                        <button id="adminOnboardBtn" onclick="submitRegisterDb()" class="chip">➕ Register Database</button>
+                    </div>
+                </div>
+
+                <!-- Reindex Database -->
+                <div class="bg-d-card border border-d-border rounded-xl p-4 mb-6">
+                    <div class="flex items-center justify-between mb-3">
+                        <div>
+                            <h2 class="text-sm font-semibold text-white">Reindex Database</h2>
+                            <p class="text-xs text-d-muted mt-1">Trigger a fresh schema extraction and vector re-indexing for a database. Useful after schema changes.</p>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <select id="reindexDbSelector" class="col-select" style="flex:1;max-width:300px">
+                            <option value="">Select a database…</option>
+                        </select>
+                        <button id="reindexBtn" onclick="triggerReindex()" class="chip">🔄 Reindex</button>
+                    </div>
+                    <div class="mt-2">
+                        <span id="reindexStatus" class="text-xs text-d-muted"></span>
+                    </div>
+                </div>
+
+                <!-- LLM Provider Settings -->
+                <div class="bg-d-card border border-d-border rounded-xl p-4 mb-6">
+                    <div class="flex items-center justify-between mb-3">
+                        <div>
+                            <h2 class="text-sm font-semibold text-white">LLM Provider</h2>
+                            <p class="text-xs text-d-muted mt-1">Switch between Ollama, OpenAI, Anthropic, or any OpenAI-compatible API.</p>
+                        </div>
+                        <div id="llmHealthBadge" class="text-xs px-2 py-1 rounded bg-d-input text-d-muted">Checking…</div>
+                    </div>
+                    <div class="grid md:grid-cols-2 gap-3">
+                        <div>
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Provider</label>
+                            <select id="llmProvider" class="col-select" style="width:100%" onchange="onLlmProviderSelect()">
+                                <option value="ollama_local">Ollama (Local)</option>
+                                <option value="openai">OpenAI</option>
+                                <option value="anthropic">Anthropic Claude</option>
+                                <option value="custom">Custom (OpenAI-compatible)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Model</label>
+                            <input id="llmModel" class="search-input" placeholder="e.g. mistral, gpt-4o-mini" value="mistral">
+                        </div>
+                        <div id="llmUrlWrap">
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">API URL</label>
+                            <input id="llmApiUrl" class="search-input" placeholder="http://localhost:11434">
+                        </div>
+                        <div id="llmKeyWrap" style="display:none">
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">API Key</label>
+                            <input id="llmApiKey" type="password" class="search-input" placeholder="sk-…">
+                        </div>
+                    </div>
+                    <div class="mt-3 flex items-center justify-between">
+                        <span id="llmSaveStatus" class="text-xs text-d-muted"></span>
+                        <button onclick="saveLlmProvider()" class="chip">💾 Save Provider</button>
+                    </div>
+                </div>
+
+                <div id="adminUserMgmtSection">
+                <div class="flex items-center justify-between mb-5">
+                    <div>
+                        <h2 class="text-lg font-semibold text-white">User Management</h2>
+                        <p class="text-xs text-d-muted mt-1">Select a database, then manage user permissions for it. Changes save automatically.</p>
+                    </div>
+                    <button onclick="loadAdminUsersForDb()" class="chip">↻ Refresh</button>
+                </div>
+                <div class="admin-panel">
+                    <!-- DB selector -->
+                    <div style="padding:12px 20px;border-bottom:1px solid #252938;background:#0d0f14">
+                        <div class="flex items-center gap-3">
+                            <label class="text-xs text-d-muted font-semibold uppercase">Database:</label>
+                            <select id="adminDbSelector" class="col-select" onchange="loadAdminUsersForDb()">
+                                <option value="">Select a database…</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="user-row" style="background:#0d0f14;padding:10px 20px">
+                        <span class="text-xs font-semibold text-d-muted uppercase" style="width:40px">#</span>
+                        <span class="text-xs font-semibold text-d-muted uppercase" style="flex:1">Username</span>
+                        <span class="text-xs font-semibold text-d-muted uppercase" style="width:100px;text-align:center">Admin</span>
+                        <span class="text-xs font-semibold text-d-muted uppercase" style="width:100px;text-align:center">Reindex</span>
+                        <span class="text-xs font-semibold text-d-muted uppercase" style="width:100px;text-align:center">Query</span>
+                        <span style="width:60px"></span>
+                    </div>
+                    <div id="adminUserList"><p class="text-sm text-d-muted p-6">Select a database above to manage user permissions.</p></div>
+                </div>
+                </div><!-- /adminUserMgmtSection -->
+            </div>
+        </div><!-- /adminTab -->
+
+        <!-- Activity Log Tab (hidden by default) -->
+        <div id="activityTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-5xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div>
+                        <h2 id="activityTitle" class="text-lg font-semibold text-white">My Activity</h2>
+                        <p id="activitySubtitle" class="text-xs text-d-muted mt-1">Your personal activity trail — every action you've performed.</p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <!-- Scope toggle (admin-only) -->
+                        <div id="activityScopeToggle" style="display:none" class="flex rounded-lg overflow-hidden border border-d-border">
+                            <button id="scopeMe" class="px-3 py-1 text-xs font-medium bg-d-accent text-white" onclick="setActivityScope('me')">My Logs</button>
+                            <button id="scopeAll" class="px-3 py-1 text-xs font-medium bg-d-card text-d-muted hover:text-white" onclick="setActivityScope('all')">All Users</button>
+                        </div>
+                        <button onclick="loadActivityLog()" class="chip">↻ Refresh</button>
+                    </div>
+                </div>
+                <!-- Filters -->
+                <div class="flex flex-wrap gap-3 mb-4 items-end">
+                    <div>
+                        <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Database</label>
+                        <select id="activityDbFilter" class="col-select" onchange="onActivityFilterChange()">
+                            <option value="">All databases</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Action</label>
+                        <select id="activityActionFilter" class="col-select" onchange="onActivityFilterChange()">
+                            <option value="">All actions</option>
+                            <optgroup label="Auth">
+                                <option value="auth.login">Login</option>
+                                <option value="auth.login_failed">Login Failed</option>
+                                <option value="auth.signup">Signup</option>
+                            </optgroup>
+                            <optgroup label="Chat">
+                                <option value="chat.query">Chat Query</option>
+                                <option value="chat.query_failed">Chat Query Failed</option>
+                                <option value="chat.execute">SQL Execute</option>
+                            </optgroup>
+                            <optgroup label="Admin">
+                                <option value="admin.register_db">Register DB</option>
+                                <option value="admin.reindex">Reindex</option>
+                                <option value="admin.update_summary">Update Summary</option>
+                            </optgroup>
+                            <optgroup label="Permissions">
+                                <option value="perm.update">Permission Update</option>
+                                <option value="perm.denied">Permission Denied</option>
+                            </optgroup>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Status</label>
+                        <select id="activityStatusFilter" class="col-select" onchange="onActivityFilterChange()">
+                            <option value="">All</option>
+                            <option value="success">✓ Success</option>
+                            <option value="failed">✗ Failed</option>
+                            <option value="denied">⛔ Denied</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Time window</label>
+                        <select id="activityTimeFilter" class="col-select" onchange="onActivityFilterChange()">
+                            <option value="1">Last 1 hour</option>
+                            <option value="6">Last 6 hours</option>
+                            <option value="24" selected>Last 24 hours</option>
+                            <option value="72">Last 3 days</option>
+                            <option value="168">Last 7 days</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">User</label>
+                        <input id="activityUserFilter" class="search-input" style="width:140px;padding:7px 10px;font-size:12px" placeholder="Filter by user…" oninput="debounceActivityLoad()">
+                    </div>
+                    <span id="activityCount" class="text-xs text-d-muted ml-auto"></span>
+                </div>
+                <!-- Stats bar -->
+                <div id="activityStats" class="flex gap-3 mb-4"></div>
+                <!-- Log table -->
+                <div class="admin-panel">
+                    <div style="display:grid;grid-template-columns:70px 80px 160px 65px 1fr 55px;align-items:center;gap:8px;padding:10px 12px;background:#0d0f14;border-bottom:1px solid #252938">
+                        <span class="text-xs font-semibold text-d-muted uppercase">Time</span>
+                        <span class="text-xs font-semibold text-d-muted uppercase">User</span>
+                        <span class="text-xs font-semibold text-d-muted uppercase">Action</span>
+                        <span class="text-xs font-semibold text-d-muted uppercase">Status</span>
+                        <span class="text-xs font-semibold text-d-muted uppercase">Details</span>
+                        <span class="text-xs font-semibold text-d-muted uppercase" style="text-align:right">Dur.</span>
+                    </div>
+                    <div id="activityLogList"><p class="text-sm text-d-muted p-6">Loading activity log…</p></div>
+                </div>
+                <!-- Pagination -->
+                <div id="activityPagination" class="flex items-center justify-center gap-3 mt-4"></div>
+            </div>
+        </div><!-- /activityTab -->
+
+        <!-- Dashboard Tab (hidden by default) -->
+        <div id="dashboardTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <!-- Dashboard list view (default) -->
+                <div id="dashboardListView">
+                    <div class="flex items-center justify-between mb-5">
+                        <div>
+                            <h2 class="text-lg font-semibold text-white">My Dashboards</h2>
+                            <p class="text-xs text-d-muted mt-1">Pin your favorite queries and charts for quick access with live data.</p>
+                        </div>
+                        <button onclick="openCreateDashboardModal()" class="chip">＋ New Dashboard</button>
+                    </div>
+                    <div id="dashboardGrid" class="grid gap-4" style="grid-template-columns:repeat(auto-fill,minmax(280px,1fr))">
+                        <p class="text-sm text-d-muted">Loading dashboards…</p>
+                    </div>
+                </div>
+
+                <!-- Single dashboard detail view (when you click into one) -->
+                <div id="dashboardDetailView" style="display:none">
+                    <div class="flex items-center justify-between mb-5">
+                        <div class="flex items-center gap-3">
+                            <button onclick="showDashboardList()" class="text-d-muted hover:text-white text-sm">← Back</button>
+                            <h2 id="dashboardDetailTitle" class="text-lg font-semibold text-white"></h2>
+                            <span id="dashboardLastUpdated" class="text-xs text-d-muted"></span>
+                        </div>
+                        <div class="flex gap-2">
+                            <button onclick="refreshCurrentDashboard()" class="chip" id="dashboardRefreshBtn">↻ Refresh All</button>
+                            <button onclick="deleteCurrentDashboard()" class="chip" style="color:#f87171">🗑 Delete</button>
+                        </div>
+                    </div>
+                    <div id="dashboardPinsGrid" class="grid gap-4" style="grid-template-columns:repeat(auto-fill,minmax(440px,1fr))">
+                    </div>
+                    <div id="dashboardEmpty" class="hidden text-center py-16">
+                        <p class="text-d-muted text-sm">No pins yet. Go to the <strong class="text-d-accent cursor-pointer" onclick="switchTab('chat')">💬 Chat</strong> tab, run a query, and click 📌 to pin results here.</p>
+                    </div>
+                </div>
+            </div>
+        </div><!-- /dashboardTab -->
+
+        <!-- Saved Queries Tab (hidden by default) -->
+        <div id="savedTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-5xl mx-auto">
+                <div class="flex items-center justify-between mb-5">
+                    <div>
+                        <h2 class="text-lg font-semibold text-white">Saved Queries</h2>
+                        <p class="text-xs text-d-muted mt-1">Your bookmarked queries — re-run any of them instantly.</p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <select id="sqDbFilter" class="col-select" onchange="loadSavedQueries()">
+                            <option value="">All databases</option>
+                        </select>
+                        <select id="sqFolderFilter" class="col-select" onchange="loadSavedQueries()">
+                            <option value="">All folders</option>
+                        </select>
+                        <label class="flex items-center gap-1 text-xs text-d-muted cursor-pointer">
+                            <input type="checkbox" id="sqFavOnly" onchange="loadSavedQueries()" style="accent-color:#fbbf24">
+                            ⭐ Favorites
+                        </label>
+                        <button onclick="loadSavedQueries()" class="chip">↻ Refresh</button>
+                    </div>
+                </div>
+                <div id="savedQueryGrid" class="grid gap-3" style="grid-template-columns:repeat(auto-fill,minmax(340px,1fr))">
+                    <p class="text-sm text-d-muted">Loading saved queries…</p>
+                </div>
+
+                <!-- F6: Scheduled Queries Section -->
+                <div class="mt-8">
+                    <div class="flex items-center justify-between mb-4">
+                        <div>
+                            <h3 class="text-base font-semibold text-white">⏰ Scheduled Queries</h3>
+                            <p class="text-xs text-d-muted mt-1">Automated query execution with optional alerts.</p>
+                        </div>
+                        <button onclick="loadSchedules()" class="chip">↻ Refresh</button>
+                    </div>
+                    <div id="scheduledQueriesContent"><p class="text-sm text-d-muted">Loading schedules…</p></div>
+                </div>
+
+                <!-- F7: Write-Back Requests Section -->
+                <div class="mt-8">
+                    <div class="flex items-center justify-between mb-4">
+                        <div>
+                            <h3 class="text-base font-semibold text-white">✏️ Write-Back Requests</h3>
+                            <p class="text-xs text-d-muted mt-1">Controlled data modifications with approval workflow.</p>
+                        </div>
+                        <button onclick="openWritebackModal()" class="chip">＋ New Request</button>
+                    </div>
+                    <div id="writebackContent"><p class="text-sm text-d-muted">Loading…</p></div>
+                </div>
+            </div>
+        </div><!-- /savedTab -->
+
+        <!-- Save Query Modal -->
+        <div id="saveQueryModal" class="modal-overlay" onclick="if(event.target===this)closeSaveQueryModal()">
+            <div class="modal-box" style="max-width:480px">
+                <div class="modal-header">
+                    <h3 class="text-sm font-semibold text-white flex-1">⭐ Save Query</h3>
+                    <button class="modal-close" onclick="closeSaveQueryModal()">✕</button>
+                </div>
+                <div class="modal-body" style="padding:20px">
+                    <div class="space-y-4">
+                        <div>
+                            <label class="text-xs text-d-muted font-semibold uppercase block mb-1.5">Query Name</label>
+                            <input id="sqName" class="search-input" placeholder="e.g. Monthly Revenue Report">
+                        </div>
+                        <div>
+                            <label class="text-xs text-d-muted font-semibold uppercase block mb-1.5">Description (optional)</label>
+                            <input id="sqDesc" class="search-input" placeholder="Brief description…">
+                        </div>
+                        <div>
+                            <label class="text-xs text-d-muted font-semibold uppercase block mb-1.5">Folder (optional)</label>
+                            <input id="sqFolder" class="search-input" placeholder="e.g. Finance, Marketing…" list="sqFolderList">
+                            <datalist id="sqFolderList"></datalist>
+                        </div>
+                        <div>
+                            <label class="flex items-center gap-2 text-xs text-d-muted cursor-pointer">
+                                <input type="checkbox" id="sqFavorite" style="accent-color:#fbbf24">
+                                Mark as favorite ⭐
+                            </label>
+                        </div>
+                        <div id="sqError" class="text-xs text-red-400" style="min-height:18px"></div>
+                        <button onclick="submitSaveQuery()" id="sqSubmitBtn" class="w-full" style="background:#7c6eff;color:#fff;border:none;border-radius:10px;padding:10px;font-size:13px;font-weight:600;cursor:pointer;transition:background .15s">⭐ Save Query</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- User Activity Modal -->
+        <div id="userActivityModal" style="display:none" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+            <div class="bg-d-card border border-d-border rounded-2xl shadow-2xl w-full max-w-4xl max-h-[85vh] flex flex-col" style="margin:20px">
+                <div class="flex items-center justify-between px-6 py-4 border-b border-d-border">
+                    <div>
+                        <h3 id="userModalTitle" class="text-base font-semibold text-white">User Activity</h3>
+                        <p id="userModalSubtitle" class="text-xs text-d-muted mt-0.5"></p>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <div id="userModalStats" class="flex gap-2"></div>
+                        <button onclick="closeUserActivityModal()" class="text-d-muted hover:text-white text-lg">&times;</button>
+                    </div>
+                </div>
+                <div class="px-6 py-3 border-b border-d-border flex gap-3 items-center">
+                    <select id="userModalActionFilter" class="col-select" onchange="loadUserModalActivity()">
+                        <option value="">All actions</option>
+                        <optgroup label="Auth"><option value="auth.login">Login</option><option value="auth.login_failed">Login Failed</option></optgroup>
+                        <optgroup label="Chat"><option value="chat.query">Chat Query</option><option value="chat.execute">SQL Execute</option></optgroup>
+                        <optgroup label="Admin"><option value="admin.register_db">Register DB</option><option value="admin.reindex">Reindex</option></optgroup>
+                        <optgroup label="Permissions"><option value="perm.update">Permission Update</option><option value="perm.denied">Denied</option></optgroup>
+                    </select>
+                    <select id="userModalTimeFilter" class="col-select" onchange="loadUserModalActivity()">
+                        <option value="24">Last 24h</option><option value="72">Last 3 days</option><option value="168">Last 7 days</option><option value="720">Last 30 days</option>
+                    </select>
+                    <span id="userModalCount" class="text-xs text-d-muted ml-auto"></span>
+                </div>
+                <div class="flex-1 overflow-y-auto">
+                    <div style="display:grid;grid-template-columns:70px 160px 65px 1fr 55px;align-items:center;gap:8px;padding:10px 12px;background:#0d0f14;border-bottom:1px solid #252938">
+                        <span class="text-xs font-semibold text-d-muted uppercase">Time</span>
+                        <span class="text-xs font-semibold text-d-muted uppercase">Action</span>
+                        <span class="text-xs font-semibold text-d-muted uppercase">Status</span>
+                        <span class="text-xs font-semibold text-d-muted uppercase">Details</span>
+                        <span class="text-xs font-semibold text-d-muted uppercase" style="text-align:right">Dur.</span>
+                    </div>
+                    <div id="userModalLogList"><p class="text-sm text-d-muted p-6">Loading…</p></div>
+                </div>
+                <div id="userModalPagination" class="flex items-center justify-center gap-3 px-6 py-3 border-t border-d-border"></div>
+            </div>
+        </div>
+        <!-- ═══════════ SCHEMA EXPLORER TAB (F2) ═══════════ -->
+        <div id="schemaTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div>
+                        <h2 class="text-lg font-semibold text-white">Schema Explorer</h2>
+                        <p class="text-xs text-d-muted mt-1">Visual overview of tables, columns, and relationships.</p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <input id="schemaSearchInput" class="search-input" style="width:200px;font-size:12px;padding:7px 12px" placeholder="Filter tables/columns…" oninput="filterSchema()">
+                        <button onclick="loadSchemaExplorer()" class="chip">↻ Refresh</button>
+                    </div>
+                </div>
+                <div id="schemaExplorerContent"><p class="text-sm text-d-muted">Loading…</p></div>
+            </div>
+        </div>
+
+        <!-- ═══════════ WORKBENCH TAB (F8) ═══════════ -->
+        <div id="workbenchTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div>
+                        <h2 class="text-lg font-semibold text-white">Multi-Query Workbench</h2>
+                        <p class="text-xs text-d-muted mt-1">Execute multiple queries side by side and compare results.</p>
+                    </div>
+                </div>
+                <div id="workbenchContent"></div>
+            </div>
+        </div>
+
+        <!-- ═══════════ LINEAGE TAB (F9) ═══════════ -->
+        <div id="lineageTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div>
+                        <h2 class="text-lg font-semibold text-white">Data Lineage</h2>
+                        <p class="text-xs text-d-muted mt-1">Table dependencies, usage patterns, and impact analysis.</p>
+                    </div>
+                    <button onclick="loadLineage()" class="chip">↻ Refresh</button>
+                </div>
+                <div id="lineageContent"><p class="text-sm text-d-muted">Loading…</p></div>
+            </div>
+        </div>
+
+        <!-- ═══════════ INTELLIGENCE TAB (F10) ═══════════ -->
+        <div id="intelligenceTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div>
+                        <h2 class="text-lg font-semibold text-white">Connection Intelligence</h2>
+                        <p class="text-xs text-d-muted mt-1">Database performance, stats, and recommendations.</p>
+                    </div>
+                    <button onclick="loadIntelligence()" class="chip">↻ Refresh</button>
+                </div>
+                <div id="intelligenceContent"><p class="text-sm text-d-muted">Loading…</p></div>
+            </div>
+        </div>
+
+        <!-- ═══════════ TEMPLATES TAB ═══════════ -->
+        <div id="templatesTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div>
+                        <h2 class="text-lg font-semibold text-white">Query Templates</h2>
+                        <p class="text-xs text-d-muted mt-1">Pre-built SQL patterns — fill in variables and execute.</p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <select id="templateCategoryFilter" class="col-select" onchange="loadTemplates()">
+                            <option value="">All categories</option>
+                        </select>
+                        <button onclick="loadTemplates()" class="chip">↻ Refresh</button>
+                    </div>
+                </div>
+                <div id="templatesContent"><p class="text-sm text-d-muted">Loading templates…</p></div>
+            </div>
+        </div>
+
+        <!-- ═══════════ CROSS-DB TAB ═══════════ -->
+        <div id="crossdbTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div>
+                        <h2 class="text-lg font-semibold text-white">Cross-Database Query</h2>
+                        <p class="text-xs text-d-muted mt-1">Execute the same query against multiple databases and compare results.</p>
+                    </div>
+                </div>
+                <div class="grid gap-4 mb-4" style="grid-template-columns:1fr 1fr">
+                    <div>
+                        <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Select Databases</label>
+                        <div id="crossDbConnectionList" class="space-y-1 max-h-48 overflow-y-auto bg-d-input border border-d-border rounded-lg p-2"></div>
+                    </div>
+                    <div>
+                        <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Merge Mode</label>
+                        <select id="crossDbMergeMode" class="col-select" style="width:100%">
+                            <option value="union">Union (stack rows)</option>
+                            <option value="side_by_side">Side by Side</option>
+                        </select>
+                    </div>
+                </div>
+                <div>
+                    <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">SQL Query</label>
+                    <textarea id="crossDbSql" class="search-input font-mono" rows="5" style="font-size:12px;resize:vertical" placeholder="SELECT COUNT(*) as total FROM orders"></textarea>
+                </div>
+                <div class="mt-3 flex items-center gap-2">
+                    <button onclick="executeCrossDb()" class="chip" style="background:rgba(124,110,255,.15);color:#a78bfa;border-color:rgba(124,110,255,.3)">▶ Execute Across Databases</button>
+                    <span id="crossDbStatus" class="text-xs text-d-muted"></span>
+                </div>
+                <div id="crossDbResults" class="mt-4"></div>
+            </div>
+        </div>
+
+        <!-- ═══════ ERD Tab ═══════ -->
+        <div id="erdTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div><h2 class="text-lg font-semibold text-white">Entity Relationship Diagram</h2>
+                    <p class="text-xs text-d-muted mt-1">Visualize table relationships as a Mermaid ER diagram.</p></div>
+                </div>
+                <div class="mb-3">
+                    <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Connection</label>
+                    <select id="erdConnectionSelect" class="col-select" style="width:300px" onchange="loadErd()">
+                        <option value="">— Select connection —</option>
+                    </select>
+                </div>
+                <div id="erdDiagram" class="bg-d-card border border-d-border rounded-xl p-6" style="min-height:300px">
+                    <p class="text-xs text-d-muted text-center">Select a connection to generate ERD</p>
+                </div>
+                <div id="erdMermaidSrc" class="mt-3" style="display:none">
+                    <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Mermaid Source</label>
+                    <textarea id="erdMermaidText" class="search-input font-mono" rows="8" readonly style="font-size:11px"></textarea>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══════ Data Quality Tab ═══════ -->
+        <div id="qualityTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div><h2 class="text-lg font-semibold text-white">Data Quality Scanner</h2>
+                    <p class="text-xs text-d-muted mt-1">Scan tables for nulls, duplicates, and data freshness.</p></div>
+                </div>
+                <div class="flex gap-3 mb-4">
+                    <div>
+                        <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Connection</label>
+                        <select id="qualityConnSelect" class="col-select" style="width:250px" onchange="loadQualityOverview()">
+                            <option value="">— Select —</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Table</label>
+                        <input id="qualityTableInput" class="search-input" placeholder="e.g. orders" style="width:200px">
+                    </div>
+                    <div class="flex items-end">
+                        <button onclick="runQualityScan()" class="chip" style="background:rgba(52,211,153,.15);color:#34d399;border-color:rgba(52,211,153,.3)">🔍 Scan Table</button>
+                    </div>
+                </div>
+                <div id="qualityOverview" class="mb-4"></div>
+                <div id="qualityScanResult" class="bg-d-card border border-d-border rounded-xl p-4" style="min-height:100px">
+                    <p class="text-xs text-d-muted text-center">Select a connection and table to scan</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══════ Query Optimizer Tab ═══════ -->
+        <div id="optimizerTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div><h2 class="text-lg font-semibold text-white">AI Query Optimizer</h2>
+                    <p class="text-xs text-d-muted mt-1">Analyze SQL queries for performance issues and get optimization suggestions.</p></div>
+                </div>
+                <div class="mb-3">
+                    <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Connection</label>
+                    <select id="optimizerConnSelect" class="col-select" style="width:300px"><option value="">— Select —</option></select>
+                </div>
+                <div class="mb-3">
+                    <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">SQL Query to Optimize</label>
+                    <textarea id="optimizerSqlInput" class="search-input font-mono" rows="5" style="font-size:12px;resize:vertical" placeholder="SELECT * FROM orders WHERE status = 'pending'"></textarea>
+                </div>
+                <button onclick="runOptimizer()" class="chip" style="background:rgba(124,110,255,.15);color:#a78bfa;border-color:rgba(124,110,255,.3)">⚡ Analyze Query</button>
+                <span id="optimizerStatus" class="text-xs text-d-muted ml-2"></span>
+                <div id="optimizerResult" class="mt-4"></div>
+            </div>
+        </div>
+
+        <!-- ═══════ Training/RAG Tab ═══════ -->
+        <div id="trainingTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div><h2 class="text-lg font-semibold text-white">Training Pairs (RAG)</h2>
+                    <p class="text-xs text-d-muted mt-1">Verified question-query pairs that improve AI accuracy over time.</p></div>
+                </div>
+                <div class="mb-3">
+                    <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Connection</label>
+                    <select id="trainingConnSelect" class="col-select" style="width:300px" onchange="loadTrainingPairs()"><option value="">— All —</option></select>
+                </div>
+                <div id="trainingPairsList" class="space-y-2"></div>
+                <div class="mt-4 bg-d-card border border-d-border rounded-xl p-4">
+                    <h3 class="text-sm font-semibold text-white mb-3">Add Training Pair</h3>
+                    <div class="grid gap-3" style="grid-template-columns:1fr 1fr">
+                        <div>
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Question (NL)</label>
+                            <input id="trainQuestion" class="search-input" placeholder="e.g. Show total revenue by month">
+                        </div>
+                        <div>
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Query</label>
+                            <input id="trainQuery" class="search-input font-mono" placeholder="SELECT ... FROM ...">
+                        </div>
+                    </div>
+                    <button onclick="addTrainingPair()" class="chip mt-3" style="background:rgba(52,211,153,.15);color:#34d399;border-color:rgba(52,211,153,.3)">+ Add Pair</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══════ File Upload Tab ═══════ -->
+        <div id="fileuploadTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div><h2 class="text-lg font-semibold text-white">File Upload & Query</h2>
+                    <p class="text-xs text-d-muted mt-1">Upload CSV, Excel, Parquet, or JSON files and query them with SQL instantly.</p></div>
+                </div>
+                <div class="bg-d-card border border-d-border rounded-xl p-6 mb-4" style="border-style:dashed">
+                    <div class="text-center">
+                        <p class="text-sm text-d-muted mb-3">Drop a file here or click to browse</p>
+                        <input type="file" id="fileUploadInput" accept=".csv,.tsv,.xlsx,.xls,.parquet,.json,.jsonl" onchange="handleFileUpload()" class="hidden">
+                        <button onclick="document.getElementById('fileUploadInput').click()" class="chip" style="background:rgba(124,110,255,.15);color:#a78bfa;border-color:rgba(124,110,255,.3)">📁 Choose File</button>
+                        <span id="fileUploadStatus" class="text-xs text-d-muted ml-2"></span>
+                    </div>
+                </div>
+                <div id="uploadedTables" class="mb-4"></div>
+                <div id="fileQuerySection" style="display:none">
+                    <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Query Uploaded Data</label>
+                    <textarea id="fileQuerySql" class="search-input font-mono" rows="3" style="font-size:12px;resize:vertical" placeholder='SELECT * FROM my_table LIMIT 10'></textarea>
+                    <button onclick="queryUploadedFile()" class="chip mt-2" style="background:rgba(124,110,255,.15);color:#a78bfa;border-color:rgba(124,110,255,.3)">▶ Run Query</button>
+                    <div id="fileQueryResult" class="mt-3"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══════ Pipeline Tab ═══════ -->
+        <div id="pipelineTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div><h2 class="text-lg font-semibold text-white">Data Pipeline Builder</h2>
+                    <p class="text-xs text-d-muted mt-1">Extract data from one database and load into another.</p></div>
+                </div>
+                <div class="grid gap-4" style="grid-template-columns:1fr 1fr">
+                    <div class="bg-d-card border border-d-border rounded-xl p-4">
+                        <h3 class="text-sm font-semibold text-d-accent mb-3">Source</h3>
+                        <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Connection</label>
+                        <select id="pipelineSrcConn" class="col-select mb-2" style="width:100%"><option value="">— Select —</option></select>
+                        <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Extract SQL</label>
+                        <textarea id="pipelineExtractSql" class="search-input font-mono" rows="4" style="font-size:12px" placeholder="SELECT * FROM orders WHERE created_at > '2024-01-01'"></textarea>
+                    </div>
+                    <div class="bg-d-card border border-d-border rounded-xl p-4">
+                        <h3 class="text-sm font-semibold text-d-green mb-3">Target</h3>
+                        <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Connection</label>
+                        <select id="pipelineTgtConn" class="col-select mb-2" style="width:100%"><option value="">— Select —</option></select>
+                        <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Target Table Name</label>
+                        <input id="pipelineTargetTable" class="search-input mb-2" placeholder="orders_backup">
+                        <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Mode</label>
+                        <select id="pipelineMode" class="col-select" style="width:100%">
+                            <option value="replace">Replace</option>
+                            <option value="append">Append</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="mt-3 flex items-center gap-2">
+                    <button onclick="executePipeline()" class="chip" style="background:rgba(52,211,153,.15);color:#34d399;border-color:rgba(52,211,153,.3)">🔄 Run Pipeline</button>
+                    <button onclick="previewPipeline()" class="chip">👁 Preview Source</button>
+                    <span id="pipelineStatus" class="text-xs text-d-muted"></span>
+                </div>
+                <div id="pipelineResult" class="mt-4"></div>
+            </div>
+        </div>
+
+        <!-- ═══════ API Generator Tab ═══════ -->
+        <div id="apigenTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div><h2 class="text-lg font-semibold text-white">API Endpoint Generator</h2>
+                    <p class="text-xs text-d-muted mt-1">Turn any saved query into a REST API endpoint with an API key.</p></div>
+                </div>
+                <div class="bg-d-card border border-d-border rounded-xl p-4 mb-4">
+                    <h3 class="text-sm font-semibold text-white mb-3">Create New Endpoint</h3>
+                    <div class="grid gap-3" style="grid-template-columns:1fr 1fr">
+                        <div>
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Saved Query</label>
+                            <select id="apiGenQuerySelect" class="col-select" style="width:100%"><option value="">— Select saved query —</option></select>
+                        </div>
+                        <div>
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">URL Slug</label>
+                            <input id="apiGenSlug" class="search-input" placeholder="e.g. daily-sales">
+                        </div>
+                    </div>
+                    <button onclick="generateApiEndpoint()" class="chip mt-3" style="background:rgba(124,110,255,.15);color:#a78bfa;border-color:rgba(124,110,255,.3)">🔌 Generate Endpoint</button>
+                </div>
+                <div id="apiGenList" class="space-y-2"></div>
+            </div>
+        </div>
+
+        <!-- ═══════ Migration Tab ═══════ -->
+        <div id="migrationTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div><h2 class="text-lg font-semibold text-white">Schema Migration (NL to DDL)</h2>
+                    <p class="text-xs text-d-muted mt-1">Describe schema changes in plain English and get SQL migration scripts.</p></div>
+                </div>
+                <div class="mb-3">
+                    <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Connection</label>
+                    <select id="migrationConnSelect" class="col-select" style="width:300px"><option value="">— Select —</option></select>
+                </div>
+                <div class="mb-3">
+                    <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Describe the Change</label>
+                    <textarea id="migrationDescription" class="search-input" rows="3" style="resize:vertical" placeholder="e.g. Add an email column to the users table, add an index on created_at in orders"></textarea>
+                </div>
+                <div class="flex items-center gap-2 mb-4">
+                    <button onclick="generateMigration(true)" class="chip" style="background:rgba(124,110,255,.15);color:#a78bfa;border-color:rgba(124,110,255,.3)">📝 Generate (Dry Run)</button>
+                    <button onclick="generateMigration(false)" class="chip" style="background:rgba(248,113,113,.15);color:#f87171;border-color:rgba(248,113,113,.3)">⚠ Execute Migration</button>
+                    <span id="migrationStatus" class="text-xs text-d-muted"></span>
+                </div>
+                <div id="migrationResult" class="bg-d-card border border-d-border rounded-xl p-4" style="min-height:80px">
+                    <p class="text-xs text-d-muted text-center">Describe a change and click Generate</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══════ Embed Tab ═══════ -->
+        <div id="embedTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div><h2 class="text-lg font-semibold text-white">Embeddable Chat Widget</h2>
+                    <p class="text-xs text-d-muted mt-1">Generate an embeddable widget to add DB chat to any website.</p></div>
+                </div>
+                <div class="bg-d-card border border-d-border rounded-xl p-4 mb-4">
+                    <h3 class="text-sm font-semibold text-white mb-3">Create Widget</h3>
+                    <div class="grid gap-3" style="grid-template-columns:1fr 1fr">
+                        <div>
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Connection</label>
+                            <select id="embedConnSelect" class="col-select" style="width:100%"><option value="">— Select —</option></select>
+                        </div>
+                        <div>
+                            <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Title</label>
+                            <input id="embedTitle" class="search-input" value="Database Chat" placeholder="Widget title">
+                        </div>
+                    </div>
+                    <button onclick="createEmbedWidget()" class="chip mt-3" style="background:rgba(124,110,255,.15);color:#a78bfa;border-color:rgba(124,110,255,.3)">🧩 Generate Widget</button>
+                </div>
+                <div id="embedSnippet" style="display:none">
+                    <label class="text-[10px] text-d-muted uppercase font-semibold block mb-1">Embed Code (copy to your website)</label>
+                    <textarea id="embedCode" class="search-input font-mono" rows="4" readonly style="font-size:11px"></textarea>
+                    <button onclick="navigator.clipboard.writeText(document.getElementById('embedCode').value)" class="chip mt-2">📋 Copy to Clipboard</button>
+                </div>
+                <div id="embedTokensList" class="mt-4"></div>
+            </div>
+        </div>
+
+    </div><!-- /appShell -->
+
+    <!-- ═══════════ SCHEDULE MODAL (F6) ═══════════ -->
+    <div id="scheduleModal" class="modal-overlay" onclick="if(event.target===this)closeScheduleModal()">
+        <div class="modal-box" style="max-width:480px">
+            <div class="modal-header">
+                <h3 class="text-sm font-semibold text-white flex-1">⏰ Schedule Query</h3>
+                <button class="modal-close" onclick="closeScheduleModal()">✕</button>
+            </div>
+            <div class="modal-body" style="padding:20px">
+                <input type="hidden" id="schedSavedQueryId">
+                <div class="space-y-4">
+                    <div>
+                        <label class="text-xs text-d-muted font-semibold uppercase block mb-1.5">Schedule Name</label>
+                        <input id="schedName" class="search-input" placeholder="e.g. Daily Sales Report">
+                    </div>
+                    <div>
+                        <label class="text-xs text-d-muted font-semibold uppercase block mb-1.5">Frequency</label>
+                        <select id="schedPreset" class="col-select" style="width:100%" onchange="document.getElementById('schedCustomCronWrap').style.display=this.value==='custom'?'':'none'">
+                            <option value="daily_9am">Daily at 9 AM</option>
+                            <option value="daily_6pm">Daily at 6 PM</option>
+                            <option value="every_hour">Every Hour</option>
+                            <option value="weekly_monday">Weekly (Monday 9 AM)</option>
+                            <option value="weekly_friday">Weekly (Friday 5 PM)</option>
+                            <option value="monthly_first">Monthly (1st at 9 AM)</option>
+                            <option value="custom">Custom Cron…</option>
+                        </select>
+                    </div>
+                    <div id="schedCustomCronWrap" style="display:none">
+                        <label class="text-xs text-d-muted font-semibold uppercase block mb-1.5">Cron Expression</label>
+                        <input id="schedCustomCron" class="search-input" placeholder="0 9 * * *">
+                    </div>
+                    <div>
+                        <label class="text-xs text-d-muted font-semibold uppercase block mb-1.5">Alert Condition</label>
+                        <select id="schedAlertType" class="col-select" style="width:100%" onchange="document.getElementById('schedAlertValueWrap').style.display=this.value!=='none'?'':'none'">
+                            <option value="none">No Alert</option>
+                            <option value="row_count">Row count exceeds…</option>
+                            <option value="no_results">No results returned</option>
+                        </select>
+                    </div>
+                    <div id="schedAlertValueWrap" style="display:none">
+                        <label class="text-xs text-d-muted font-semibold uppercase block mb-1.5">Threshold Value</label>
+                        <input id="schedAlertValue" class="search-input" type="number" placeholder="100">
+                    </div>
+                    <button onclick="submitSchedule()" class="w-full" style="background:#7c6eff;color:#fff;border:none;border-radius:10px;padding:10px;font-size:13px;font-weight:600;cursor:pointer">⏰ Create Schedule</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══════════ WRITE-BACK MODAL (F7) ═══════════ -->
+    <div id="writebackModal" class="modal-overlay" onclick="if(event.target===this)closeWritebackModal()">
+        <div class="modal-box" style="max-width:560px">
+            <div class="modal-header">
+                <h3 class="text-sm font-semibold text-white flex-1">✏️ Write-Back Request</h3>
+                <button class="modal-close" onclick="closeWritebackModal()">✕</button>
+            </div>
+            <div class="modal-body" style="padding:20px">
+                <div class="space-y-4">
+                    <div>
+                        <label class="text-xs text-d-muted font-semibold uppercase block mb-1.5">SQL (INSERT, UPDATE, or DELETE)</label>
+                        <textarea id="wbSql" class="search-input" rows="5" style="font-family:monospace;font-size:12px;resize:vertical" placeholder="UPDATE products SET price = 29.99 WHERE id = 42"></textarea>
+                    </div>
+                    <div>
+                        <label class="text-xs text-d-muted font-semibold uppercase block mb-1.5">Reason (optional)</label>
+                        <input id="wbReason" class="search-input" placeholder="Why is this change needed?">
+                    </div>
+                    <p class="text-[10px] text-d-muted">Write-back requests require admin approval before execution.</p>
+                    <button onclick="submitWriteback()" class="w-full" style="background:#7c6eff;color:#fff;border:none;border-radius:10px;padding:10px;font-size:13px;font-weight:600;cursor:pointer">Submit Request</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Chart Modal -->
+    <div id="chartModal" class="modal-overlay" onclick="if(event.target===this)closeChartModal()">
+        <div class="modal-box">
+            <div class="modal-header">
+                <h3 id="chartModalTitle" class="text-sm font-semibold text-white flex-1">Chart</h3>
+                <button id="chartPinBtn" class="chip" onclick="pinCurrentChart()" style="font-size:12px;padding:4px 10px" title="Pin to dashboard">📌 Pin</button>
+                <button class="modal-close" onclick="closeChartModal()">✕</button>
+            </div>
+            <div class="modal-body"><canvas id="chartModalCanvas"></canvas></div>
+        </div>
+    </div>
+
+    <!-- Pin to Dashboard Modal -->
+    <div id="pinModal" class="modal-overlay" onclick="if(event.target===this)closePinModal()">
+        <div class="modal-box" style="max-width:480px">
+            <div class="modal-header">
+                <h3 class="text-sm font-semibold text-white flex-1">📌 Pin to Dashboard</h3>
+                <button class="modal-close" onclick="closePinModal()">✕</button>
+            </div>
+            <div class="modal-body" style="padding:20px">
+                <div class="space-y-4">
+                    <div>
+                        <label class="text-xs text-d-muted font-semibold uppercase block mb-1.5">Pin Name</label>
+                        <input id="pinName" class="search-input" placeholder="e.g. Monthly Revenue Trend">
+                    </div>
+                    <div>
+                        <label class="text-xs text-d-muted font-semibold uppercase block mb-1.5">Dashboard</label>
+                        <select id="pinDashboardSelect" class="col-select" style="width:100%" onchange="onPinDashboardChange()">
+                            <option value="__new__">＋ Create new dashboard</option>
+                        </select>
+                    </div>
+                    <div id="pinNewDashboardWrap">
+                        <label class="text-xs text-d-muted font-semibold uppercase block mb-1.5">New Dashboard Name</label>
+                        <input id="pinNewDashboardName" class="search-input" placeholder="e.g. Sales Overview">
+                    </div>
+                    <div id="pinError" class="text-xs text-red-400" style="min-height:18px"></div>
+                    <button onclick="submitPin()" id="pinSubmitBtn" class="w-full" style="background:#7c6eff;color:#fff;border:none;border-radius:10px;padding:10px;font-size:13px;font-weight:600;cursor:pointer;transition:background .15s">📌 Pin It</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Create Dashboard Modal -->
+    <div id="createDashboardModal" class="modal-overlay" onclick="if(event.target===this)closeCreateDashboardModal()">
+        <div class="modal-box" style="max-width:420px">
+            <div class="modal-header">
+                <h3 class="text-sm font-semibold text-white flex-1">＋ New Dashboard</h3>
+                <button class="modal-close" onclick="closeCreateDashboardModal()">✕</button>
+            </div>
+            <div class="modal-body" style="padding:20px">
+                <div class="space-y-4">
+                    <div>
+                        <label class="text-xs text-d-muted font-semibold uppercase block mb-1.5">Dashboard Name</label>
+                        <input id="newDashName" class="search-input" placeholder="e.g. Sales Overview">
+                    </div>
+                    <div>
+                        <label class="text-xs text-d-muted font-semibold uppercase block mb-1.5">Description (optional)</label>
+                        <input id="newDashDesc" class="search-input" placeholder="Brief description…">
+                    </div>
+                    <div id="createDashError" class="text-xs text-red-400" style="min-height:18px"></div>
+                    <button onclick="submitCreateDashboard()" id="createDashBtn" class="w-full" style="background:#7c6eff;color:#fff;border:none;border-radius:10px;padding:10px;font-size:13px;font-weight:600;cursor:pointer;transition:background .15s">Create Dashboard</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Detail Explorer Modal -->
+    <div id="detailModal" class="modal-overlay" onclick="if(event.target===this)closeDetailModal()">
+        <div class="modal-box" style="max-width:1100px;max-height:92vh">
+            <div class="modal-header" style="flex-wrap:wrap;gap:8px">
+                <h3 class="text-sm font-semibold text-white">Data Explorer</h3>
+                <div class="flex items-center gap-2 flex-1 min-w-[280px] ml-4">
+                    <select id="detailCol" class="col-select" onchange="filterDetailTable()"><option value="__all__">All columns</option></select>
+                    <div class="flex-1 relative">
+                        <input id="detailSearch" class="search-input" placeholder="Search (regex supported)…" oninput="filterDetailTable()">
+                        <div id="detailRegexErr" class="regex-err hidden"></div>
+                    </div>
+                    <span id="detailCount" class="text-xs text-d-muted whitespace-nowrap">0 rows</span>
+                </div>
+                <button onclick="exportDetailCSV()" class="export-btn" style="font-size:11px">⬇ CSV</button>
+                <button onclick="exportDetailJSON()" class="export-btn" style="font-size:11px">⬇ JSON</button>
+                <button class="modal-close" onclick="closeDetailModal()">✕</button>
+            </div>
+            <div class="modal-body" id="detailBody" style="padding:0"></div>
+        </div>
+    </div>
+
+    <!-- Explain Query Modal -->
+    <div id="explainModal" class="modal-overlay" onclick="if(event.target===this)closeExplainModal()">
+        <div class="modal-box" style="max-width:640px">
+            <div class="modal-header">
+                <h3 class="text-sm font-semibold text-white flex-1">🧠 Query Explanation</h3>
+                <button class="modal-close" onclick="closeExplainModal()">✕</button>
+            </div>
+            <div id="explainBody" class="modal-body" style="max-height:70vh;overflow-y:auto;padding:20px"></div>
+        </div>
+    </div>
+
+    <script src="app.js?v=16.0"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>mermaid.initialize({startOnLoad:false, theme:'dark'});</script>
+    <script src="features.js?v=17.0"></script>
+    <style>@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}</style>
+</body>
+</html>
