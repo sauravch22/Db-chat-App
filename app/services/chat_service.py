@@ -1,6 +1,7 @@
 """Chat service - Main orchestration for natural language queries"""
 
 import logging
+import threading
 import time
 import uuid
 import re
@@ -59,6 +60,7 @@ _REPAIRABLE_ERROR_MARKERS = (
 # ── Engine cache with TTL ─────────────────────────────────
 _engine_cache: Dict[int, Any] = {}
 _engine_cache_ts: Dict[int, float] = {}
+_engine_cache_lock = threading.Lock()
 
 
 def _get_engine(connection: "Connection", timeout: int = 30):
@@ -66,37 +68,39 @@ def _get_engine(connection: "Connection", timeout: int = 30):
     cache_key = connection.id
     now = time.time()
 
-    if cache_key in _engine_cache:
-        if (now - _engine_cache_ts.get(cache_key, 0)) < ENGINE_CACHE_TTL:
-            return _engine_cache[cache_key]
-        try:
-            _engine_cache[cache_key].dispose()
-        except Exception:
-            pass
-        del _engine_cache[cache_key]
-        _engine_cache_ts.pop(cache_key, None)
+    with _engine_cache_lock:
+        if cache_key in _engine_cache:
+            if (now - _engine_cache_ts.get(cache_key, 0)) < ENGINE_CACHE_TTL:
+                return _engine_cache[cache_key]
+            try:
+                _engine_cache[cache_key].dispose()
+            except Exception:
+                pass
+            del _engine_cache[cache_key]
+            _engine_cache_ts.pop(cache_key, None)
 
-    conn_string = SchemaExtractor.build_connection_string(
-        connection.database_type, connection.host, connection.port,
-        connection.username, connection.password, connection.database,
-    )
-    dt = connection.database_type.lower()
-    connect_args = {}
-    if dt in ("postgres", "postgresql"):
-        connect_args = {"connect_timeout": timeout}
-    elif dt == "sqlite":
-        connect_args = {"timeout": timeout}
+        conn_string = SchemaExtractor.build_connection_string(
+            connection.database_type, connection.host, connection.port,
+            connection.username, connection.password, connection.database,
+        )
+        dt = connection.database_type.lower()
+        connect_args = {}
+        if dt in ("postgres", "postgresql"):
+            connect_args = {"connect_timeout": timeout}
+        elif dt == "sqlite":
+            connect_args = {"timeout": timeout}
 
-    engine = create_engine(conn_string, poolclass=NullPool, connect_args=connect_args)
-    _engine_cache[cache_key] = engine
-    _engine_cache_ts[cache_key] = now
-    return engine
+        engine = create_engine(conn_string, poolclass=NullPool, connect_args=connect_args)
+        _engine_cache[cache_key] = engine
+        _engine_cache_ts[cache_key] = now
+        return engine
 
 
 def evict_engine(connection_id: int):
     """Explicitly remove a cached engine (call after credentials change)."""
-    eng = _engine_cache.pop(connection_id, None)
-    _engine_cache_ts.pop(connection_id, None)
+    with _engine_cache_lock:
+        eng = _engine_cache.pop(connection_id, None)
+        _engine_cache_ts.pop(connection_id, None)
     if eng:
         try:
             eng.dispose()
@@ -853,7 +857,10 @@ class ChatService:
                 if (re.search(r'\brow\s+count\b|\brow\s+size\b|\btable\s+size\b|\bhow\s+many\s+rows\b', lower)
                         and mentioned_tables):
                     for tbl in mentioned_tables:
-                        cnt = conn.execute(text(f'SELECT COUNT(*) FROM "{tbl}"')).scalar()
+                        if tbl not in known_set:
+                            continue
+                        safe_tbl = tbl.replace('"', '""')
+                        cnt = conn.execute(text(f'SELECT COUNT(*) FROM "{safe_tbl}"')).scalar()
                         result["answers"][f"row_count:{tbl}"] = int(cnt)
 
                 # PostgreSQL-specific monitoring
@@ -891,8 +898,8 @@ class ChatService:
         if not sql:
             return "SQL is empty"
         sql_upper = sql.strip().upper()
-        if not sql_upper.startswith("SELECT"):
-            return "Only SELECT queries are allowed"
+        if not (sql_upper.startswith("SELECT") or sql_upper.startswith("WITH")):
+            return "Only SELECT queries (including CTEs) are allowed"
         for cmd in FORBIDDEN_SQL_COMMANDS:
             if re.search(rf'\b{cmd}\b', sql_upper):
                 return f"Command '{cmd}' is not allowed"
@@ -1071,16 +1078,20 @@ class ChatService:
 
     async def execute_query(
         self, connection_id: int, sql: str, timeout: int = 30,
+        allow_dml: bool = False,
     ) -> Dict[str, Any]:
-        """Execute a SQL query directly (used by workbench and API endpoints)."""
+        """Execute a SQL query directly (used by workbench and API endpoints).
+
+        Set ``allow_dml=True`` for approved write-back operations (INSERT/UPDATE/DELETE).
+        """
         start_time = time.time()
 
         try:
             sql_upper = sql.strip().upper()
-            if not sql_upper.startswith("SELECT"):
+            if not allow_dml and not (sql_upper.startswith("SELECT") or sql_upper.startswith("WITH")):
                 return {
                     "success": False,
-                    "error": "Only SELECT queries are allowed",
+                    "error": "Only SELECT queries (including CTEs) are allowed",
                     "execution_time_ms": int((time.time() - start_time) * 1000),
                 }
 
@@ -1104,9 +1115,24 @@ class ChatService:
                     "execution_time_ms": int((time.time() - start_time) * 1000),
                 }
 
+            is_dml = allow_dml and sql_upper[:6] in ("INSERT", "UPDATE", "DELETE")
+
             exec_start = time.time()
             with engine.connect() as conn:
                 result = conn.execute(text(sql))
+                if is_dml:
+                    row_count = result.rowcount
+                    conn.commit()
+                    exec_ms = int((time.time() - exec_start) * 1000)
+                    return {
+                        "success": True,
+                        "columns": [],
+                        "rows": [],
+                        "row_count": row_count if row_count >= 0 else 0,
+                        "execution_time_ms": exec_ms,
+                        "truncated": False,
+                    }
+
                 rows = result.fetchmany(MAX_RESULT_ROWS + 1)
                 columns = list(result.keys())
                 truncated = len(rows) > MAX_RESULT_ROWS
@@ -1261,9 +1287,6 @@ class ChatService:
                 self.metadata.close()
         except Exception:
             pass
-
-    def __del__(self):
-        self.close()
 
     def __enter__(self):
         return self

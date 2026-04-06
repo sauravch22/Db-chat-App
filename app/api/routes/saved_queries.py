@@ -63,6 +63,8 @@ class RunResult(BaseModel):
 @router.post("", response_model=SavedQueryOut, status_code=201)
 async def save_query(body: SaveQueryReq, user: dict = Depends(get_current_user)):
     """Save a query for later re-use."""
+    if not has_db_permission(user, body.connection_id, "prompt_query"):
+        raise HTTPException(403, "Permission required on this database")
     db = SessionLocal()
     try:
         sq = SavedQuery(

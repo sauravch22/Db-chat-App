@@ -17,8 +17,8 @@ from app.services.auth_service import (
     VALID_PERMISSIONS,
 )
 from app.services.activity_service import log_activity, Actions
-from app.api.deps import get_current_user, is_db_admin, has_any_onboard
-from app.models import User, UserPermission, Connection, TableAccess
+from app.api.deps import get_current_user, is_db_admin, has_any_onboard, has_db_permission
+from app.models import User, UserPermission, Connection, TableAccess, Database, Table
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +157,9 @@ async def list_users(
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """List all users with their full permission maps."""
+    """List all users with their full permission maps (admin only)."""
+    if not has_any_onboard(current_user):
+        raise HTTPException(status_code=403, detail="Admin permission required to list users")
     await log_activity(req, user=current_user, action=Actions.VIEW_USERS, db=db)
     users = db.query(User).all()
     result = []
@@ -398,10 +400,13 @@ async def list_available_tables(
     if not is_db_admin(current_user, connection_id):
         raise HTTPException(403, "Only admins can view this")
 
-    from app.models import Table
     tables = (
         db.query(Table.name)
-        .filter(Table.connection_id == connection_id)
+        .filter(
+            Table.database_id.in_(
+                db.query(Database.id).filter(Database.connection_id == connection_id)
+            )
+        )
         .order_by(Table.name)
         .all()
     )

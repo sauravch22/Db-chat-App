@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query as QParam
 from pydantic import BaseModel
 from typing import Optional, List
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, has_db_permission
 from app.database import SessionLocal
 from app.models import TrainingPair
 
@@ -25,6 +25,8 @@ class AddTrainingPairRequest(BaseModel):
 
 @router.post("")
 async def add_training_pair(req: AddTrainingPairRequest, user: dict = Depends(get_current_user)):
+    if not has_db_permission(user, req.connection_id, "prompt_query"):
+        raise HTTPException(403, "Permission required on this database")
     db = SessionLocal()
     try:
         pair = TrainingPair(
@@ -45,15 +47,15 @@ async def add_training_pair(req: AddTrainingPairRequest, user: dict = Depends(ge
 
 @router.get("")
 async def list_training_pairs(
-    connection_id: Optional[int] = QParam(None),
+    connection_id: int = QParam(..., description="Required: database connection ID"),
     limit: int = QParam(50),
     user: dict = Depends(get_current_user),
 ):
+    if not has_db_permission(user, connection_id, "prompt_query"):
+        raise HTTPException(403, "Permission required on this database")
     db = SessionLocal()
     try:
-        q = db.query(TrainingPair)
-        if connection_id:
-            q = q.filter(TrainingPair.connection_id == connection_id)
+        q = db.query(TrainingPair).filter(TrainingPair.connection_id == connection_id)
         pairs = q.order_by(TrainingPair.created_at.desc()).limit(limit).all()
         return [
             {"id": p.id, "question": p.question, "query": p.query,
@@ -86,6 +88,8 @@ async def delete_training_pair(pair_id: int, user: dict = Depends(get_current_us
         pair = db.query(TrainingPair).filter(TrainingPair.id == pair_id).first()
         if not pair:
             raise HTTPException(404, "Training pair not found")
+        if pair.user_id != int(user["sub"]):
+            raise HTTPException(403, "You can only delete your own training pairs")
         db.delete(pair)
         db.commit()
         return {"deleted": True}
@@ -97,6 +101,8 @@ async def delete_training_pair(pair_id: int, user: dict = Depends(get_current_us
 async def get_training_context(connection_id: int, question: str = QParam(""),
                                 user: dict = Depends(get_current_user)):
     """Get relevant training pairs for RAG context injection."""
+    if not has_db_permission(user, connection_id, "prompt_query"):
+        raise HTTPException(403, "Permission required on this database")
     db = SessionLocal()
     try:
         pairs = db.query(TrainingPair).filter(
@@ -121,6 +127,8 @@ async def auto_save_from_chat(
     user: dict = Depends(get_current_user),
 ):
     """Automatically save a successful chat interaction as a training pair."""
+    if not has_db_permission(user, connection_id, "prompt_query"):
+        raise HTTPException(403, "Permission required on this database")
     db = SessionLocal()
     try:
         existing = db.query(TrainingPair).filter(

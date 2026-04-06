@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, has_db_permission
 from app.database import SessionLocal
 from app.models import Connection
 from app.services.ollama_service import OllamaService
@@ -25,6 +25,11 @@ class OptimizeRequest(BaseModel):
 @router.post("/analyze")
 async def analyze_query(req: OptimizeRequest, user: dict = Depends(get_current_user)):
     """Analyze a SQL query for performance issues and suggest optimizations."""
+    if not has_db_permission(user, req.connection_id, "prompt_query"):
+        raise HTTPException(403, "Permission required on this database")
+    sql_upper = req.sql.strip().upper()
+    if not (sql_upper.startswith("SELECT") or sql_upper.startswith("WITH")):
+        raise HTTPException(400, "Only SELECT queries can be analyzed")
     db = SessionLocal()
     try:
         conn = db.query(Connection).filter(Connection.id == req.connection_id,
@@ -46,7 +51,8 @@ async def analyze_query(req: OptimizeRequest, user: dict = Depends(get_current_u
                                     connect_args={"connect_timeout": 10})
             try:
                 with engine.connect() as c:
-                    plan_result = c.execute(text(f"EXPLAIN (FORMAT JSON, ANALYZE false) {req.sql}"))
+                    explain_sql = f"EXPLAIN (FORMAT JSON, ANALYZE false) {req.sql}"
+                    plan_result = c.execute(text(explain_sql))
                     plan = plan_result.fetchone()[0]
                     analysis["explain_plan"] = plan
 

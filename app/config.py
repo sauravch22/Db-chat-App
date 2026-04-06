@@ -1,5 +1,8 @@
 """Configuration management for DbChat"""
 
+import secrets
+from urllib.parse import quote_plus
+
 from pydantic_settings import BaseSettings
 from pydantic import Field
 from typing import Optional
@@ -44,10 +47,15 @@ class Settings(BaseSettings):
     OLLAMA_EMBED_TIMEOUT_SEC: float = Field(default=30.0, alias="OLLAMA_EMBED_TIMEOUT_SEC")
     OLLAMA_CLASSIFY_TIMEOUT_SEC: float = Field(default=30.0, alias="OLLAMA_CLASSIFY_TIMEOUT_SEC")
     
+    # Security
+    JWT_SECRET: str = Field(default="", alias="JWT_SECRET")
+    ADMIN_DEFAULT_PASSWORD: str = Field(default="", alias="ADMIN_DEFAULT_PASSWORD")
+    ALLOWED_ORIGINS: str = Field(default="http://localhost:3000", alias="ALLOWED_ORIGINS")
+
     # Application
     APP_ENV: str = Field(default="development", alias="APP_ENV")
-    DEBUG: bool = Field(default=True, alias="DEBUG")
-    LOG_LEVEL: str = Field(default="DEBUG", alias="LOG_LEVEL")
+    DEBUG: bool = Field(default=False, alias="DEBUG")
+    LOG_LEVEL: str = Field(default="INFO", alias="LOG_LEVEL")
     
     # API
     API_HOST: str = Field(default="0.0.0.0", alias="API_HOST")
@@ -101,6 +109,20 @@ class Settings(BaseSettings):
         "case_sensitive": True
     }
     
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        if not self.JWT_SECRET:
+            import logging
+            logging.getLogger(__name__).warning(
+                "JWT_SECRET not set — generating a random secret. "
+                "Set JWT_SECRET in .env for stable tokens across restarts."
+            )
+            object.__setattr__(self, "JWT_SECRET", secrets.token_urlsafe(48))
+        if not self.ADMIN_DEFAULT_PASSWORD:
+            object.__setattr__(self, "ADMIN_DEFAULT_PASSWORD", secrets.token_urlsafe(16))
+
     @property
     def DATABASE_URL(self) -> str:
-        return f"postgresql://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
+        user = quote_plus(self.DB_USER)
+        password = quote_plus(self.DB_PASSWORD)
+        return f"postgresql://{user}:{password}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"

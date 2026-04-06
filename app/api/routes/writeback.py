@@ -173,6 +173,7 @@ async def execute_writeback(wb_id: int, user: dict = Depends(get_current_user)):
                 connection_id=wb.connection_id,
                 sql=wb.sql,
                 timeout=30,
+                allow_dml=True,
             )
         finally:
             chat_service.close()

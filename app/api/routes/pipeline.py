@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, is_db_admin
 from app.database import SessionLocal
 from app.models import Connection
 from app.services.schema_service import SchemaExtractor
@@ -37,7 +37,11 @@ class PipelineRequest(BaseModel):
 
 @router.post("/execute")
 async def execute_pipeline(req: PipelineRequest, user: dict = Depends(get_current_user)):
-    """Execute a simple ETL pipeline: extract from source, load into target."""
+    """Execute a simple ETL pipeline: extract from source, load into target (admin only)."""
+    if not is_db_admin(user, req.source_connection_id):
+        raise HTTPException(403, "Admin permission required on source database")
+    if not is_db_admin(user, req.target_connection_id):
+        raise HTTPException(403, "Admin permission required on target database")
     db = SessionLocal()
     try:
         source = db.query(Connection).filter(Connection.id == req.source_connection_id, Connection.is_active == True).first()
@@ -90,6 +94,11 @@ async def execute_pipeline(req: PipelineRequest, user: dict = Depends(get_curren
 async def preview_pipeline(connection_id: int, sql: str, limit: int = 10,
                              user: dict = Depends(get_current_user)):
     """Preview source data before running a pipeline."""
+    if not is_db_admin(user, connection_id):
+        raise HTTPException(403, "Admin permission required on this database")
+    sql_upper = sql.strip().upper()
+    if not (sql_upper.startswith("SELECT") or sql_upper.startswith("WITH")):
+        raise HTTPException(400, "Only SELECT queries are allowed for preview")
     db = SessionLocal()
     try:
         conn = db.query(Connection).filter(Connection.id == connection_id, Connection.is_active == True).first()
@@ -101,7 +110,8 @@ async def preview_pipeline(connection_id: int, sql: str, limit: int = 10,
         engine = create_engine(conn_str, poolclass=NullPool)
         try:
             with engine.connect() as c:
-                r = c.execute(text(f"SELECT * FROM ({sql}) AS preview LIMIT {limit}"))
+                safe_limit = min(int(limit), 1000)
+                r = c.execute(text(f"SELECT * FROM ({sql}) AS preview LIMIT :lim"), {"lim": safe_limit})
                 cols = list(r.keys())
                 rows = [dict(zip(cols, row)) for row in r.fetchall()]
                 return {"columns": cols, "rows": rows, "row_count": len(rows)}

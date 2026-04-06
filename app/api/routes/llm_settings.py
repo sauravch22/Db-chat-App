@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, has_any_onboard
 from app.services.llm_provider import (
     get_provider, get_provider_config, set_provider,
     get_all_role_configs, set_role_provider, clear_role_provider,
@@ -61,6 +61,8 @@ class SetProviderRequest(BaseModel):
 @router.post("/provider")
 async def change_provider(req: SetProviderRequest, user: dict = Depends(get_current_user)):
     """Switch the active LLM provider at runtime (admin only)."""
+    if not has_any_onboard(user):
+        raise HTTPException(403, "Admin permission required to change LLM provider")
     valid_ids = {p["id"] for p in SUPPORTED_PROVIDERS}
     if req.provider not in valid_ids:
         raise HTTPException(400, f"Unknown provider '{req.provider}'. Supported: {valid_ids}")
@@ -111,7 +113,9 @@ class SetRoleRequest(BaseModel):
 
 @router.post("/model-routing")
 async def set_model_routing(req: SetRoleRequest, user: dict = Depends(get_current_user)):
-    """Set or update the LLM provider for a specific task role."""
+    """Set or update the LLM provider for a specific task role (admin only)."""
+    if not has_any_onboard(user):
+        raise HTTPException(403, "Admin permission required to change model routing")
     if req.role not in VALID_ROLES:
         raise HTTPException(400, f"Unknown role '{req.role}'. Valid: {list(VALID_ROLES)}")
     valid_ids = {p["id"] for p in SUPPORTED_PROVIDERS}
@@ -140,7 +144,9 @@ class ClearRoleRequest(BaseModel):
 
 @router.delete("/model-routing")
 async def clear_model_routing(req: ClearRoleRequest, user: dict = Depends(get_current_user)):
-    """Remove a role override so it falls back to the default provider."""
+    """Remove a role override so it falls back to the default provider (admin only)."""
+    if not has_any_onboard(user):
+        raise HTTPException(403, "Admin permission required")
     if req.role not in VALID_ROLES:
         raise HTTPException(400, f"Unknown role '{req.role}'. Valid: {list(VALID_ROLES)}")
     clear_role_provider(req.role)

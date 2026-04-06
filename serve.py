@@ -124,8 +124,9 @@ async def lifespan(app: FastAPI):
     try:
         admin = get_user_by_username(db, "admin")
         if not admin:
-            admin = create_user(db, "admin", "admin123")
-            logger.info("Default admin user created (admin / admin123)")
+            admin_pw = settings.ADMIN_DEFAULT_PASSWORD
+            admin = create_user(db, "admin", admin_pw)
+            logger.info("Default admin user created (admin / <see ADMIN_DEFAULT_PASSWORD>)")
 
         # Ensure admin has exactly db_onboard as global perm (clean up old rows)
         set_db_permissions(db, admin.id, None, ["db_onboard"])
@@ -144,12 +145,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+_origins = [o.strip() for o in settings.ALLOWED_ORIGINS.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_origins,
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"]
+    allow_headers=["*"],
 )
 app.include_router(health.router, tags=["Health"])
 app.include_router(auth.router, tags=["Auth"])

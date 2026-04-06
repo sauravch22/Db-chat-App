@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, has_db_permission
 from app.database import SessionLocal
 from app.models import Connection
 from app.services.nosql_service import get_nosql_handler
@@ -49,6 +49,8 @@ def _build_uri(conn) -> str:
 
 @router.get("/schema/{connection_id}")
 async def nosql_schema(connection_id: int, user: dict = Depends(get_current_user)):
+    if not has_db_permission(user, connection_id, "prompt_query"):
+        raise HTTPException(403, "Permission required on this database")
     db = SessionLocal()
     try:
         conn = db.query(Connection).filter(Connection.id == connection_id,
@@ -78,6 +80,8 @@ class NoSQLQueryRequest(BaseModel):
 
 @router.post("/execute")
 async def nosql_execute(request: NoSQLQueryRequest, user: dict = Depends(get_current_user)):
+    if not has_db_permission(user, request.connection_id, "prompt_query"):
+        raise HTTPException(403, "Permission required on this database")
     db = SessionLocal()
     try:
         conn = db.query(Connection).filter(Connection.id == request.connection_id,

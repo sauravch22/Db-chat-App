@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import Optional
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, has_db_permission
 from app.database import SessionLocal
 from app.models import Connection
 from app.services.chat_service import ChatService
@@ -29,6 +29,8 @@ class CreateEmbedRequest(BaseModel):
 @router.post("/create")
 async def create_embed(req: CreateEmbedRequest, user: dict = Depends(get_current_user)):
     """Generate an embeddable widget token and HTML snippet."""
+    if not has_db_permission(user, req.connection_id, "prompt_query"):
+        raise HTTPException(403, "Permission required on this database")
     db = SessionLocal()
     try:
         conn = db.query(Connection).filter(Connection.id == req.connection_id,
@@ -130,21 +132,22 @@ async def widget_frame(token: str, theme: str = "light"):
     if (!msg) return;
     addMsg(msg, 'user');
     q.value = '';
-    fetch('/api/chat', {{
+    fetch('/api/embed/query?token='+TOKEN+'&prompt='+encodeURIComponent(msg), {{
       method: 'POST',
-      headers: {{'Content-Type':'application/json','Authorization':'Bearer embed:'+TOKEN}},
-      body: JSON.stringify({{prompt:msg,connection_id:CONN}})
+      headers: {{'Content-Type':'application/json'}},
     }}).then(r=>r.json()).then(d=>{{
       var text = d.answer || d.error || 'No response';
       if (d.sql) text += '\\n```sql\\n' + d.sql + '\\n```';
       addMsg(text, 'bot');
     }}).catch(e=>addMsg('Error: '+e.message,'bot'));
   }}
+  function _escHtml(s) {{ var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }}
   function addMsg(text, cls) {{
     var d = document.createElement('div');
     d.className = 'msg ' + cls;
-    text = text.replace(/```(\\w*)\\n([\\s\\S]*?)```/g, '<pre>$2</pre>');
-    d.innerHTML = text;
+    var safe = _escHtml(text);
+    safe = safe.replace(/```(\\w*)\\n([\\s\\S]*?)```/g, '<pre>$2</pre>');
+    d.innerHTML = safe;
     document.getElementById('msgs').appendChild(d);
     d.scrollIntoView({{behavior:'smooth'}});
   }}
@@ -160,7 +163,11 @@ async def embed_query(token: str, prompt: str):
     cfg = _embed_tokens[token]
     svc = ChatService()
     try:
-        result = await svc.process_query(cfg["connection_id"], prompt, int(cfg["user_id"]))
+        result = await svc.process_query(
+            connection_id=cfg["connection_id"],
+            user_prompt=prompt,
+            user_id=int(cfg["user_id"]),
+        )
         return result
     finally:
         svc.close()

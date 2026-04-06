@@ -24,7 +24,7 @@ async function searchHistory() {
     list.innerHTML = items.map(i => `
         <div class="p-2 border-b border-d-border hover:bg-d-hover cursor-pointer" onclick="loadThreadFromSearch('${i.thread_id}')">
             <div class="text-xs text-d-text truncate">${_esc(i.prompt)}</div>
-            <div class="text-[10px] text-d-muted mt-0.5">${i.sql ? i.sql.substring(0, 60) + '…' : ''}</div>
+            <div class="text-[10px] text-d-muted mt-0.5">${i.sql ? _esc(i.sql.substring(0, 60)) + '…' : ''}</div>
             <div class="text-[10px] text-d-muted">${_timeAgo(i.created_at)}</div>
         </div>
     `).join('');
@@ -377,6 +377,7 @@ async function submitSchedule() {
 async function runScheduleNow(id) {
     try {
         const r = await authFetch(`${chatUrl()}/api/scheduled/${id}/run`, { method: 'POST' });
+        if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || 'Run failed'); }
         const data = await r.json();
         if (data.alert_triggered) {
             showToast(`🔔 Alert! ${data.alert_message}`);
@@ -517,35 +518,6 @@ async function executeWriteback(id) {
 
 let workbenchPanes = [{ id: 'wb-1', sql: '', label: 'Query 1' }];
 let workbenchResults = {};
-
-function renderWorkbench() {
-    const container = document.getElementById('workbenchContent');
-    if (!container) return;
-    container.innerHTML = `
-        <div class="flex items-center gap-2 mb-3">
-            <button class="chip" onclick="addWorkbenchPane()">＋ Add Query</button>
-            <button class="chip" onclick="executeWorkbench()" style="background:rgba(124,110,255,.15);color:#a78bfa;border-color:rgba(124,110,255,.3)">▶ Run All</button>
-            <button class="chip" onclick="diffWorkbench()">⇔ Diff First Two</button>
-        </div>
-        <div class="grid gap-4" style="grid-template-columns:repeat(auto-fill,minmax(480px,1fr))">
-            ${workbenchPanes.map((p, i) => `
-                <div class="bg-d-card border border-d-border rounded-xl overflow-hidden">
-                    <div class="px-3 py-2 border-b border-d-border flex items-center justify-between bg-d-surface">
-                        <input class="bg-transparent text-xs text-white font-semibold outline-none flex-1" 
-                               value="${_esc(p.label)}" onchange="workbenchPanes[${i}].label=this.value">
-                        ${i > 0 ? `<button class="text-d-muted hover:text-d-red text-xs ml-2" onclick="removeWorkbenchPane(${i})">✕</button>` : ''}
-                    </div>
-                    <textarea id="${p.id}-sql" class="w-full bg-d-input text-xs text-d-text font-mono p-3 outline-none resize-none"
-                              rows="5" placeholder="Enter SQL…" oninput="workbenchPanes[${i}].sql=this.value">${_esc(p.sql)}</textarea>
-                    <div id="${p.id}-result" class="p-2 max-h-64 overflow-auto text-xs">
-                        ${workbenchResults[p.id] ? renderWorkbenchResult(workbenchResults[p.id]) : '<span class="text-d-muted">Results will appear here</span>'}
-                    </div>
-                </div>
-            `).join('')}
-        </div>
-        <div id="workbenchDiffResult" class="mt-4"></div>
-    `;
-}
 
 function addWorkbenchPane() {
     const n = workbenchPanes.length + 1;
@@ -1202,9 +1174,6 @@ function initWorkbenchEditor(paneId) {
     if (el.value) cm.setValue(el.value);
 }
 
-// Override renderWorkbench to use CodeMirror
-const _origRenderWorkbench = typeof renderWorkbench === 'function' ? renderWorkbench : null;
-
 function renderWorkbench() {
     cmEditors = {};
     const container = document.getElementById('workbenchContent');
@@ -1296,7 +1265,11 @@ async function loadErd() {
         const data = await r.json();
         document.getElementById('erdMermaidText').value = data.mermaid;
         document.getElementById('erdMermaidSrc').style.display = '';
-        container.innerHTML = `<div class="mermaid">${data.mermaid}</div>`;
+        const mermaidDiv = document.createElement('div');
+        mermaidDiv.className = 'mermaid';
+        mermaidDiv.textContent = data.mermaid;
+        container.innerHTML = '';
+        container.appendChild(mermaidDiv);
         await mermaid.run({ nodes: container.querySelectorAll('.mermaid') });
     } catch(e) {
         container.innerHTML = `<p class="text-xs text-d-red">${e.message}</p>`;
@@ -1351,7 +1324,7 @@ async function runQualityScan() {
             html += '<div class="mb-3">';
             data.issues.forEach(iss => {
                 const color = iss.severity === 'warning' ? '#fbbf24' : '#6b7084';
-                html += `<div class="text-xs mb-1" style="color:${color}">⚠ ${iss.message}</div>`;
+                html += `<div class="text-xs mb-1" style="color:${color}">⚠ ${_esc(iss.message)}</div>`;
             });
             html += '</div>';
         }
@@ -1359,7 +1332,7 @@ async function runQualityScan() {
             html += '<table class="dt"><thead><tr><th>Column</th><th>Type</th><th>Completeness</th><th>Nulls</th><th>Distinct</th><th>Uniqueness</th></tr></thead><tbody>';
             data.columns.forEach(c => {
                 const compColor = c.completeness >= 95 ? '#34d399' : c.completeness >= 80 ? '#fbbf24' : '#f87171';
-                html += `<tr><td>${c.name}</td><td class="text-d-muted">${c.type}</td>
+                html += `<tr><td>${_esc(c.name)}</td><td class="text-d-muted">${_esc(c.type)}</td>
                     <td><span style="color:${compColor}">${c.completeness}%</span></td>
                     <td class="num">${c.null_count?.toLocaleString()}</td>
                     <td class="num">${c.distinct_count?.toLocaleString() || '—'}</td>
@@ -1394,28 +1367,33 @@ async function runOptimizer() {
             html += '<div class="bg-d-card border border-d-border rounded-xl p-4 mb-3"><h3 class="text-sm font-semibold text-white mb-2">Issues Found</h3>';
             data.issues.forEach(iss => {
                 const color = iss.severity === 'high' ? '#f87171' : iss.severity === 'medium' ? '#fbbf24' : '#6b7084';
-                html += `<div class="text-xs mb-1" style="color:${color}">● ${iss.message}</div>`;
+                html += `<div class="text-xs mb-1" style="color:${color}">● ${_esc(iss.message)}</div>`;
             });
             html += '</div>';
         }
         if (data.suggestions?.length) {
             html += '<div class="bg-d-card border border-d-border rounded-xl p-4 mb-3"><h3 class="text-sm font-semibold text-d-green mb-2">Suggestions</h3>';
-            data.suggestions.forEach(s => { html += `<div class="text-xs text-d-text mb-1">→ ${s}</div>`; });
+            data.suggestions.forEach(s => { html += `<div class="text-xs text-d-text mb-1">→ ${_esc(s)}</div>`; });
             html += '</div>';
         }
         if (data.optimized_sql) {
+            const escapedSql = _esc(data.optimized_sql);
             html += `<div class="bg-d-card border border-d-border rounded-xl p-4"><h3 class="text-sm font-semibold text-d-accent mb-2">Optimized SQL</h3>
-                <div class="sql-block">${data.optimized_sql}</div>
-                <button onclick="document.getElementById('optimizerSqlInput').value=\`${data.optimized_sql.replace(/`/g,'\\`')}\`" class="chip mt-2">Use This Query</button></div>`;
+                <div class="sql-block">${escapedSql}</div>
+                <button class="chip mt-2" id="useOptimizedBtn">Use This Query</button></div>`;
+            requestAnimationFrame(() => {
+                const btn = document.getElementById('useOptimizedBtn');
+                if (btn) btn.onclick = () => { document.getElementById('optimizerSqlInput').value = data.optimized_sql; };
+            });
         }
         if (data.explain_plan) {
             html += `<details class="mt-3"><summary class="text-xs text-d-muted cursor-pointer">EXPLAIN Plan (JSON)</summary>
-                <pre class="sql-block mt-1" style="font-size:11px">${JSON.stringify(data.explain_plan, null, 2)}</pre></details>`;
+                <pre class="sql-block mt-1" style="font-size:11px">${_esc(JSON.stringify(data.explain_plan, null, 2))}</pre></details>`;
         }
         container.innerHTML = html || '<p class="text-xs text-d-green">No issues found.</p>';
         if (status) status.textContent = '';
     } catch(e) {
-        container.innerHTML = `<p class="text-xs text-d-red">${e.message}</p>`;
+        container.innerHTML = `<p class="text-xs text-d-red">${_esc(e.message)}</p>`;
         if (status) status.textContent = '';
     }
 }
@@ -1424,12 +1402,11 @@ async function runOptimizer() {
 function initTrainingTab() { _populateConnSelect('trainingConnSelect'); loadTrainingPairs(); }
 
 async function loadTrainingPairs() {
-    const connId = document.getElementById('trainingConnSelect')?.value;
+    const connId = document.getElementById('trainingConnSelect')?.value || selectedConnId;
     const container = document.getElementById('trainingPairsList');
-    if (!container) return;
+    if (!container || !connId) return;
     try {
-        let url = `${chatUrl()}/api/training?limit=50`;
-        if (connId) url += `&connection_id=${connId}`;
+        let url = `${chatUrl()}/api/training?connection_id=${connId}&limit=50`;
         const r = await authFetch(url);
         if (!r.ok) return;
         const pairs = await r.json();
@@ -1437,8 +1414,8 @@ async function loadTrainingPairs() {
         let html = '<table class="dt"><thead><tr><th>Question</th><th>Query</th><th>Type</th><th>Verified</th><th>Votes</th><th></th></tr></thead><tbody>';
         pairs.forEach(p => {
             html += `<tr>
-                <td class="text-xs">${p.question}</td>
-                <td class="text-xs font-mono text-d-accent" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.query}</td>
+                <td class="text-xs">${_esc(p.question)}</td>
+                <td class="text-xs font-mono text-d-accent" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_esc(p.query)}</td>
                 <td class="text-xs text-d-muted">${p.query_type}</td>
                 <td>${p.is_verified ? '✅' : '⏳'}</td>
                 <td class="num">${p.upvotes || 0}</td>
@@ -1534,11 +1511,11 @@ async function queryUploadedFile() {
         let html = `<p class="text-xs text-d-muted mb-2">${data.row_count} rows</p>`;
         if (data.rows?.length) {
             html += '<div style="max-height:400px;overflow:auto"><table class="dt"><thead><tr>';
-            data.columns.forEach(c => { html += `<th>${c}</th>`; });
+            data.columns.forEach(c => { html += `<th>${_esc(c)}</th>`; });
             html += '</tr></thead><tbody>';
             data.rows.slice(0, 200).forEach(row => {
                 html += '<tr>';
-                data.columns.forEach(c => { html += `<td>${row[c] ?? ''}</td>`; });
+                data.columns.forEach(c => { html += `<td>${_esc(String(row[c] ?? ''))}</td>`; });
                 html += '</tr>';
             });
             html += '</tbody></table></div>';
@@ -1599,11 +1576,11 @@ async function previewPipeline() {
         let html = `<p class="text-xs text-d-muted mb-2">Preview (${data.row_count} rows)</p>`;
         if (data.rows?.length) {
             html += '<div style="max-height:300px;overflow:auto"><table class="dt"><thead><tr>';
-            data.columns.forEach(c => { html += `<th>${c}</th>`; });
+            data.columns.forEach(c => { html += `<th>${_esc(c)}</th>`; });
             html += '</tr></thead><tbody>';
             data.rows.forEach(row => {
                 html += '<tr>';
-                data.columns.forEach(c => { html += `<td>${row[c] ?? ''}</td>`; });
+                data.columns.forEach(c => { html += `<td>${_esc(String(row[c] ?? ''))}</td>`; });
                 html += '</tr>';
             });
             html += '</tbody></table></div>';
@@ -1621,7 +1598,7 @@ async function initApiGenTab() {
         const sel = document.getElementById('apiGenQuerySelect');
         if (!sel) return;
         sel.innerHTML = '<option value="">— Select saved query —</option>';
-        queries.forEach(q => { sel.innerHTML += `<option value="${q.id}">${q.name || q.sql?.substring(0,50)}</option>`; });
+        queries.forEach(q => { sel.innerHTML += `<option value="${q.id}">${_esc(q.name || q.sql?.substring(0,50))}</option>`; });
     } catch(e) { console.error(e); }
     loadApiEndpoints();
 }
@@ -1698,9 +1675,9 @@ async function generateMigration(dryRun) {
                 <span class="text-sm font-semibold ${data.executed ? 'text-d-green' : 'text-d-accent'}">${data.executed ? '✅ Migration Executed' : '📝 Migration Script (Dry Run)'}</span>
                 <span class="text-[10px] text-d-muted">${data.dialect}</span>
             </div>
-            <div class="sql-block">${data.migration_sql}</div>`;
-        if (data.error) html += `<p class="text-xs text-d-red mt-2">Error: ${data.error}</p>`;
-        if (data.message) html += `<p class="text-xs text-d-green mt-2">${data.message}</p>`;
+            <div class="sql-block">${_esc(data.migration_sql)}</div>`;
+        if (data.error) html += `<p class="text-xs text-d-red mt-2">Error: ${_esc(data.error)}</p>`;
+        if (data.message) html += `<p class="text-xs text-d-green mt-2">${_esc(data.message)}</p>`;
         html += '</div>';
         container.innerHTML = html;
         if (status) status.textContent = '';
@@ -1788,9 +1765,9 @@ async function loadConcepts() {
         el.innerHTML = concepts.map(c => `
             <div class="bg-d-card border border-d-border rounded-lg p-3 mb-2 flex items-center justify-between">
                 <div class="flex-1">
-                    <span class="text-white font-semibold text-sm">${c.name}</span>
-                    ${c.category ? `<span class="text-[10px] text-d-muted ml-2 bg-d-input px-2 py-0.5 rounded">${c.category}</span>` : ''}
-                    ${c.description ? `<p class="text-xs text-d-muted mt-1">${c.description}</p>` : ''}
+                    <span class="text-white font-semibold text-sm">${_esc(c.name)}</span>
+                    ${c.category ? `<span class="text-[10px] text-d-muted ml-2 bg-d-input px-2 py-0.5 rounded">${_esc(c.category)}</span>` : ''}
+                    ${c.description ? `<p class="text-xs text-d-muted mt-1">${_esc(c.description)}</p>` : ''}
                     <span class="text-[10px] text-d-muted">${c.mapping_count} column mapping(s)</span>
                 </div>
                 <div class="flex gap-2">
@@ -1928,11 +1905,11 @@ async function loadGlossaryTerms() {
         el.innerHTML = terms.map(t => `
             <div class="bg-d-card border border-d-border rounded-lg p-3 mb-2 flex items-center justify-between">
                 <div class="flex-1">
-                    <span class="text-white font-semibold text-sm">${t.term}</span>
-                    ${t.category ? `<span class="text-[10px] text-d-muted ml-2 bg-d-input px-2 py-0.5 rounded">${t.category}</span>` : ''}
-                    <p class="text-xs text-d-muted mt-1">${t.definition}</p>
-                    ${t.sql_expression ? `<p class="text-[10px] font-mono text-d-accent mt-1">SQL: ${t.sql_expression}</p>` : ''}
-                    ${t.synonyms ? `<p class="text-[10px] text-d-muted mt-0.5">Also: ${t.synonyms}</p>` : ''}
+                    <span class="text-white font-semibold text-sm">${_esc(t.term)}</span>
+                    ${t.category ? `<span class="text-[10px] text-d-muted ml-2 bg-d-input px-2 py-0.5 rounded">${_esc(t.category)}</span>` : ''}
+                    <p class="text-xs text-d-muted mt-1">${_esc(t.definition)}</p>
+                    ${t.sql_expression ? `<p class="text-[10px] font-mono text-d-accent mt-1">SQL: ${_esc(t.sql_expression)}</p>` : ''}
+                    ${t.synonyms ? `<p class="text-[10px] text-d-muted mt-0.5">Also: ${_esc(t.synonyms)}</p>` : ''}
                 </div>
                 <div class="flex gap-2 items-center">
                     <button onclick="upvoteGlossary(${t.id})" class="chip text-[10px]">👍 ${t.upvotes || 0}</button>
@@ -2015,9 +1992,9 @@ async function loadCorrections() {
         el.innerHTML = '<h4 class="text-xs text-d-muted mb-2 mt-2">Recent Corrections</h4>' +
             corrections.map(c => `
                 <div class="bg-d-input border border-d-border rounded-lg p-2 mb-1 text-[11px]">
-                    <div class="text-d-muted">Q: ${c.original_prompt}</div>
-                    <div class="text-white mt-0.5">Fix: ${c.correction_text}</div>
-                    ${c.corrected_sql ? `<div class="text-d-accent font-mono mt-0.5">${c.corrected_sql}</div>` : ''}
+                    <div class="text-d-muted">Q: ${_esc(c.original_prompt)}</div>
+                    <div class="text-white mt-0.5">Fix: ${_esc(c.correction_text)}</div>
+                    ${c.corrected_sql ? `<div class="text-d-accent font-mono mt-0.5">${_esc(c.corrected_sql)}</div>` : ''}
                     <div class="text-[9px] text-d-muted mt-0.5">Applied ${c.applied_count}x</div>
                 </div>
             `).join('');

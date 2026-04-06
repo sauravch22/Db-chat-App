@@ -401,7 +401,7 @@ function _appendSummaryCard(summary) {
     if (!lastBot) return;
     const card = document.createElement('div');
     card.className = 'summary-card msg-in';
-    card.innerHTML = `<h5>AI Insights</h5><p>${summary.replace(/\n/g, '<br>')}</p>`;
+    card.innerHTML = `<h5>AI Insights</h5><p>${_esc(summary).replace(/\n/g, '<br>')}</p>`;
     const parent = lastBot.closest('.msg-in') || lastBot;
     parent.after(card);
 }
@@ -683,7 +683,7 @@ async function addBotReply(query, data) {
 
     const st = [];
     if (data.row_count != null) st.push(`<span class="text-d-accent font-semibold">${data.row_count}</span> rows`);
-    if (data.selected_tables?.length) st.push(`Tables: <span class="text-d-accent font-semibold">${data.selected_tables.join(', ')}</span>`);
+    if (data.selected_tables?.length) st.push(`Tables: <span class="text-d-accent font-semibold">${data.selected_tables.map(t => esc(t)).join(', ')}</span>`);
     if (data.execution_time_ms) st.push(`${(data.execution_time_ms/1000).toFixed(1)}s`);
     if (st.length) h += `<div class="flex flex-wrap gap-3 text-xs text-d-muted">${st.join(' · ')}</div>`;
 
@@ -2178,7 +2178,13 @@ async function loadUserModalStats() {
 
 // ESC key closes modals
 document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') { closeChartModal(); closeDetailModal(); closeUserActivityModal(); closePinModal(); closeCreateDashboardModal(); closeExplainModal(); closeSaveQueryModal(); }
+    if (e.key === 'Escape') {
+        const openModal = document.querySelector('.modal-overlay.open');
+        if (openModal) {
+            const closeBtn = openModal.querySelector('.modal-close');
+            if (closeBtn) closeBtn.click();
+        }
+    }
 });
 
 // ═════════════════════════════════════════════════════

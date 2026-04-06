@@ -21,9 +21,11 @@ from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
 from app.models import User, UserPermission
+from app.config import Settings
 
 # ── Config ────────────────────────────────────────────
-SECRET_KEY = "dbchat-jwt-secret-change-in-production-2026"
+_settings = Settings()
+SECRET_KEY = _settings.JWT_SECRET
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 5
 

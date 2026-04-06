@@ -78,11 +78,23 @@ async def analyze_data(request: AnalyzeRequest):
     Lux automatically generates optimal visualizations based on data
     """
     try:
-        # Fetch data from S3 if URL provided
         if request.data_url:
+            url_str = str(request.data_url)
+            import ipaddress, urllib.parse
+            parsed = urllib.parse.urlparse(url_str)
+            blocked_hosts = {"localhost", "127.0.0.1", "0.0.0.0", "metadata.google.internal", "169.254.169.254"}
+            if parsed.hostname and parsed.hostname.lower() in blocked_hosts:
+                raise HTTPException(status_code=400, detail="Fetching from private/internal URLs is not allowed")
+            try:
+                addr = ipaddress.ip_address(parsed.hostname or "")
+                if addr.is_private or addr.is_loopback or addr.is_link_local:
+                    raise HTTPException(status_code=400, detail="Fetching from private/internal URLs is not allowed")
+            except ValueError:
+                pass
+
             logger.info(f"Fetching data from: {request.data_url}")
             async with httpx.AsyncClient() as client:
-                response = await client.get(str(request.data_url), timeout=10.0)
+                response = await client.get(url_str, timeout=10.0)
                 if response.status_code != 200:
                     raise HTTPException(status_code=400, detail="Failed to fetch data from URL")
                 data = response.json()

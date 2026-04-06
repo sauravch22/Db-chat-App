@@ -22,9 +22,10 @@ BACKEND_URL = f"http://{BACKEND_HOST}:{BACKEND_PORT}"
 
 app = FastAPI(title="DbChat Frontend")
 
+_allowed = os.getenv("ALLOWED_ORIGINS", f"http://localhost:{FRONTEND_PORT}").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[o.strip() for o in _allowed if o.strip()],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

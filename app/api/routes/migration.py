@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, is_db_admin
 from app.database import SessionLocal
 from app.models import Connection
 from app.services.ollama_service import OllamaService
@@ -24,7 +24,9 @@ class MigrationRequest(BaseModel):
 
 @router.post("/generate")
 async def generate_migration(req: MigrationRequest, user: dict = Depends(get_current_user)):
-    """Generate SQL migration from natural language description."""
+    """Generate SQL migration from natural language description (admin only)."""
+    if not is_db_admin(user, req.connection_id):
+        raise HTTPException(403, "Admin permission required for schema migrations")
     db = SessionLocal()
     try:
         conn = db.query(Connection).filter(Connection.id == req.connection_id,

@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from typing import Optional, List
 
 from app.database import SessionLocal
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, has_db_permission, is_db_admin
 from app.models import (
     EntityConcept, EntityMapping, ColumnFingerprint,
     GlossaryTerm, ColumnAnnotation, QueryCorrection,
@@ -170,6 +170,8 @@ async def fingerprint_connection(
     db=Depends(_get_db),
     user=Depends(get_current_user),
 ):
+    if not is_db_admin(user, connection_id):
+        raise HTTPException(403, "Admin permission required for fingerprinting")
     conn = db.query(Connection).filter(
         Connection.id == connection_id, Connection.is_active.is_(True),
     ).first()

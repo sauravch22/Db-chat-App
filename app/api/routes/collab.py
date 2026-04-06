@@ -54,18 +54,20 @@ async def collab_websocket(websocket: WebSocket, session_id: str):
         await websocket.close(code=4004, reason="Session not found")
         return
 
-    await websocket.accept()
-
     token = websocket.query_params.get("token", "")
-    user_id = "anon"
-    username = "Anonymous"
-    try:
-        from app.services.auth_service import decode_access_token
-        payload = decode_access_token(token)
-        user_id = str(payload.get("sub", "anon"))
-        username = payload.get("username", "Anonymous")
-    except Exception:
-        pass
+    if not token:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
+
+    from app.services.auth_service import decode_access_token
+    payload = decode_access_token(token)
+    if not payload:
+        await websocket.close(code=4001, reason="Invalid or expired token")
+        return
+
+    user_id = str(payload.get("sub", "anon"))
+    username = payload.get("username", "Anonymous")
+    await websocket.accept()
 
     if session_id not in _connections:
         _connections[session_id] = set()

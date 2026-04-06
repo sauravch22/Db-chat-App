@@ -7,16 +7,16 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, has_db_permission
 from app.database import SessionLocal
 from app.models import GeneratedEndpoint, SavedQuery
 from app.services.chat_service import ChatService
 
+import time
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/endpoints", tags=["API Generator"])
-
-_generated_endpoints = {}
 
 
 class CreateEndpointRequest(BaseModel):
@@ -31,9 +31,14 @@ class CreateEndpointRequest(BaseModel):
 async def generate_endpoint(req: CreateEndpointRequest, user: dict = Depends(get_current_user)):
     db = SessionLocal()
     try:
-        sq = db.query(SavedQuery).filter(SavedQuery.id == req.saved_query_id).first()
+        sq = db.query(SavedQuery).filter(
+            SavedQuery.id == req.saved_query_id,
+            SavedQuery.user_id == int(user["sub"]),
+        ).first()
         if not sq:
             raise HTTPException(404, "Saved query not found")
+        if not has_db_permission(user, sq.connection_id, "prompt_query"):
+            raise HTTPException(403, "Permission required on this database")
 
         slug = req.path_slug.strip("/").replace(" ", "-").lower()
         slug = "".join(c if c.isalnum() or c in ("-", "_") else "" for c in slug)
@@ -94,7 +99,10 @@ async def list_endpoints(user: dict = Depends(get_current_user)):
 async def delete_endpoint(endpoint_id: int, user: dict = Depends(get_current_user)):
     db = SessionLocal()
     try:
-        ep = db.query(GeneratedEndpoint).filter(GeneratedEndpoint.id == endpoint_id).first()
+        ep = db.query(GeneratedEndpoint).filter(
+            GeneratedEndpoint.id == endpoint_id,
+            GeneratedEndpoint.user_id == int(user["sub"]),
+        ).first()
         if not ep:
             raise HTTPException(404, "Endpoint not found")
         db.delete(ep)

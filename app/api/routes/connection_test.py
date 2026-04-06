@@ -5,8 +5,10 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from typing import Optional
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, has_any_onboard
 from app.services.schema_service import SchemaExtractor
+
+import ipaddress
 
 logger = logging.getLogger(__name__)
 
@@ -24,9 +26,23 @@ class TestConnectionRequest(BaseModel):
     database: Optional[str] = ""
 
 
+def _is_private_host(host: str) -> bool:
+    """Block connections to private/loopback addresses to prevent SSRF."""
+    try:
+        addr = ipaddress.ip_address(host)
+        return addr.is_private or addr.is_loopback or addr.is_link_local
+    except ValueError:
+        blocked = {"localhost", "metadata.google.internal", "169.254.169.254"}
+        return host.lower() in blocked
+
+
 @router.post("/test")
 async def test_connection(req: TestConnectionRequest, user: dict = Depends(get_current_user)):
-    """Test a database connection without registering it."""
+    """Test a database connection without registering it (requires db_onboard)."""
+    if not has_any_onboard(user):
+        return {"success": False, "message": "Admin permission required to test connections"}
+    if _is_private_host(req.host):
+        return {"success": False, "message": "Connections to private/internal addresses are not allowed"}
     dt = req.database_type.lower()
 
     if dt in NOSQL_TYPES:

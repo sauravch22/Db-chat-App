@@ -1,5 +1,8 @@
 """Qdrant Vector Database Service"""
 
+import hashlib
+import uuid
+
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 import logging
@@ -54,8 +57,9 @@ class VectorService:
         """Insert or update vector in database"""
         
         try:
+            stable_uuid = str(uuid.UUID(hashlib.md5(vector_id.encode()).hexdigest()))
             point = PointStruct(
-                id=hash(vector_id) % (10**9),  # Convert string to positive int
+                id=stable_uuid,
                 vector=embedding,
                 payload={
                     "vector_id": vector_id,

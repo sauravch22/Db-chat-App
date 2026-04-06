@@ -263,6 +263,7 @@ async def chat(
                     th_db.query(ChatHistory)
                     .filter(
                         ChatHistory.thread_id == thread_id,
+                        ChatHistory.user_id == int(user["sub"]),
                         ChatHistory.status == "success",
                         ChatHistory.sql.isnot(None),
                     )
@@ -363,6 +364,7 @@ async def chat_stream(
                     entries = (
                         th_db.query(ChatHistory)
                         .filter(ChatHistory.thread_id == thread_id,
+                                ChatHistory.user_id == int(user["sub"]),
                                 ChatHistory.status == "success",
                                 ChatHistory.sql.isnot(None))
                         .order_by(ChatHistory.created_at.asc())
@@ -621,18 +623,19 @@ async def list_threads(
         )
 
         result = []
+        uid = int(user["sub"])
         for r in rows:
-            # Fetch title from the first message of this thread
             first_msg = (
                 db.query(ChatHistory)
-                .filter(ChatHistory.thread_id == r.thread_id)
+                .filter(ChatHistory.thread_id == r.thread_id,
+                        ChatHistory.user_id == uid)
                 .order_by(ChatHistory.created_at.asc())
                 .first()
             )
-            # Fetch last prompt
             last_msg = (
                 db.query(ChatHistory)
-                .filter(ChatHistory.thread_id == r.thread_id)
+                .filter(ChatHistory.thread_id == r.thread_id,
+                        ChatHistory.user_id == uid)
                 .order_by(ChatHistory.created_at.desc())
                 .first()
             )
