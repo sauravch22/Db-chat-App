@@ -1,5 +1,6 @@
 """Chat service - Main orchestration for natural language queries"""
 
+import hashlib
 import logging
 import threading
 import time
@@ -13,8 +14,14 @@ from app.services.ollama_service import OllamaService
 from app.services.vector_service import VectorService
 from app.services.metadata_service import MetadataService
 from app.services.schema_service import SchemaExtractor
+from app.services.cache_service import CacheService
+from app.services.metrics import (
+    CHAT_QUERIES, CHAT_TABLE_SELECTION, CHAT_REPAIR_ATTEMPTS,
+    CHAT_REPAIR_SUCCESS, CHAT_CACHE_OPS, CHAT_QUERY_EXEC_DURATION,
+    track_llm,
+)
 from app.database import SessionLocal
-from app.models import Connection, Database, Table, Column
+from app.models import Connection, Database, Table, Column, TrainingPair
 from app.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -118,10 +125,13 @@ def _sanitize_backticks(raw_sql: str, db_dialect: str) -> str:
 class ChatService:
     """Main chat orchestration service"""
 
+    SQL_CACHE_TTL = 3600
+
     def __init__(self):
         self.ollama = OllamaService()
         self.vector = VectorService()
         self.metadata = MetadataService()
+        self.cache = CacheService()
         self.db = SessionLocal()
         self._closed = False
 
@@ -263,10 +273,32 @@ class ChatService:
             except Exception as e:
                 logger.debug("[%s] Semantic enrichment skipped: %s", qid, e)
 
-            # ── SQL generation ──
-            sql, reasoning, llm_ms = await self._generate_sql(
-                qid, user_prompt, schema_context, db_dialect, thread_history,
-            )
+            # ── Training pair few-shot examples ──
+            training_ctx = self._get_training_context(connection_id, user_prompt)
+            if training_ctx:
+                schema_context = schema_context + "\n\n" + training_ctx
+                logger.debug("[%s] Injected training pair context (%d chars)",
+                             qid, len(training_ctx))
+
+            # ── SQL cache check ──
+            cache_key = self._sql_cache_key(connection_id, user_prompt)
+            cached_sql = await self.cache.get(cache_key)
+            if cached_sql and not thread_history:
+                CHAT_CACHE_OPS.labels(op="hit").inc()
+                sql = cached_sql
+                reasoning, llm_ms = "", 0
+                logger.info("[%s] SQL cache hit", qid)
+            else:
+                if not cached_sql:
+                    CHAT_CACHE_OPS.labels(op="miss").inc()
+                # ── SQL generation ──
+                with track_llm("sql_generate"):
+                    sql, reasoning, llm_ms = await self._generate_sql(
+                        qid, user_prompt, schema_context, db_dialect, thread_history,
+                    )
+                await self.cache.set(cache_key, sql, ttl=self.SQL_CACHE_TTL)
+                CHAT_CACHE_OPS.labels(op="set").inc()
+
             sql = _sanitize_backticks(sql, db_dialect)
             logger.debug("[%s] Generated SQL (%dms): %s", qid, llm_ms, sql)
 
@@ -288,6 +320,7 @@ class ChatService:
             exec_start = time.time()
             result = await self._execute_query(connection, sql, timeout)
             exec_ms = int((time.time() - exec_start) * 1000)
+            CHAT_QUERY_EXEC_DURATION.observe(exec_ms / 1000)
 
             if result.get("status") == "error":
                 repaired = await self._repair_loop(
@@ -295,6 +328,7 @@ class ChatService:
                     user_prompt, sample_info, db_dialect, connection, timeout,
                 )
                 if repaired:
+                    CHAT_REPAIR_SUCCESS.inc()
                     answer = await self._format_answer(
                         user_prompt, repaired["sql"],
                         repaired["rows"], repaired["columns"], repaired["row_count"],
@@ -306,6 +340,7 @@ class ChatService:
                         qid, repaired["row_count"], llm_ms,
                         repaired["exec_ms"], elapsed,
                     )
+                    CHAT_QUERIES.labels(status="success", intent=intent).inc()
                     return {
                         "status": "success", "answer": answer,
                         "sql": repaired["sql"],
@@ -315,6 +350,7 @@ class ChatService:
                         "query_time_ms": repaired["exec_ms"],
                         "selected_tables": table_names,
                     }
+                CHAT_QUERIES.labels(status="error", intent=intent).inc()
                 return {
                     **result, "sql": sql,
                     "execution_time_ms": int((time.time() - start_time) * 1000),
@@ -330,6 +366,7 @@ class ChatService:
                 "[%s] query done  type=data  rows=%d  llm=%dms  exec=%dms  total=%dms",
                 qid, result["row_count"], llm_ms, exec_ms, elapsed,
             )
+            CHAT_QUERIES.labels(status="success", intent=intent).inc()
             return {
                 "status": "success", "answer": answer, "sql": sql,
                 "rows": result["rows"], "columns": result["columns"],
@@ -342,6 +379,7 @@ class ChatService:
         except Exception as e:
             elapsed = int((time.time() - start_time) * 1000)
             logger.error("[%s] Unhandled error after %dms: %s", qid, elapsed, e, exc_info=True)
+            CHAT_QUERIES.labels(status="error", intent="unknown").inc()
             return {
                 "status": "error",
                 "error": f"Query processing failed: {str(e)}",
@@ -377,6 +415,61 @@ class ChatService:
             logger.info("[%s] Table access filter: blocked %s for user %d",
                         qid, blocked, user_id)
         return filtered
+
+    # ── SQL cache helpers ──────────────────────────────────
+
+    @staticmethod
+    def _sql_cache_key(connection_id: int, prompt: str) -> str:
+        normalized = prompt.lower().strip()
+        h = hashlib.sha256(normalized.encode()).hexdigest()[:16]
+        return f"sql:{connection_id}:{h}"
+
+    # ── Training pair injection ────────────────────────────
+
+    def _get_training_context(
+        self, connection_id: int, user_prompt: str, max_examples: int = 5,
+    ) -> str:
+        """Retrieve verified/upvoted training pairs as few-shot examples."""
+        try:
+            pairs = (
+                self.db.query(TrainingPair)
+                .filter(
+                    TrainingPair.connection_id == connection_id,
+                    TrainingPair.is_verified.is_(True),
+                )
+                .order_by(TrainingPair.upvotes.desc())
+                .limit(30)
+                .all()
+            )
+            if not pairs:
+                return ""
+
+            prompt_words = set(user_prompt.lower().split())
+            scored = []
+            for p in pairs:
+                q_words = set(p.question.lower().split())
+                if not q_words:
+                    continue
+                jaccard = len(prompt_words & q_words) / len(prompt_words | q_words)
+                if jaccard >= 0.1:
+                    scored.append((jaccard, p))
+
+            if not scored:
+                scored = [(0, p) for p in pairs[:max_examples]]
+
+            scored.sort(key=lambda x: x[0], reverse=True)
+            selected = [p for _, p in scored[:max_examples]]
+
+            lines = ["EXAMPLE QUERIES (use these patterns as guidance):"]
+            for p in selected:
+                lines.append(f"  Q: {p.question}")
+                lines.append(f"  SQL: {p.query}")
+                lines.append("")
+
+            return "\n".join(lines)
+        except Exception as e:
+            logger.debug("Training context fetch failed: %s", e)
+            return ""
 
     # ── Table selection (retrieve → rerank → expand) ──────
 
@@ -653,6 +746,7 @@ class ChatService:
             current_sql = regenerated
             current_error = result.get("error", "")
 
+        CHAT_REPAIR_ATTEMPTS.observe(MAX_REPAIR_ATTEMPTS)
         logger.warning("[%s] All %d repair attempts exhausted", qid, MAX_REPAIR_ATTEMPTS)
         return None
 
@@ -1326,6 +1420,8 @@ class ChatService:
                 self.metadata.close()
         except Exception:
             pass
+        # Cache cleanup is async; best-effort from sync close
+        self.cache = None  # type: ignore[assignment]
 
     def __enter__(self):
         return self

@@ -400,28 +400,38 @@ class SemanticGraphService:
     # ── Corrections context ───────────────────────────────
 
     def build_corrections_context(self, connection_id: int, prompt: str) -> str:
-        """Find relevant past corrections to include as few-shot examples."""
+        """Find relevant past corrections using Jaccard word-similarity scoring."""
         corrections = (
             self.db.query(QueryCorrection)
             .filter(QueryCorrection.connection_id == connection_id)
             .order_by(QueryCorrection.applied_count.desc())
-            .limit(20)
+            .limit(30)
             .all()
         )
         if not corrections:
             return ""
 
-        prompt_lower = prompt.lower()
-        relevant = []
-        for c in corrections:
-            if any(w in prompt_lower for w in c.original_prompt.lower().split()[:5]):
-                relevant.append(c)
-
-        if not relevant:
+        prompt_words = set(prompt.lower().split())
+        if not prompt_words:
             return ""
 
+        scored: list[tuple[float, QueryCorrection]] = []
+        for c in corrections:
+            corr_words = set(c.original_prompt.lower().split())
+            if not corr_words:
+                continue
+            jaccard = len(prompt_words & corr_words) / len(prompt_words | corr_words)
+            if jaccard >= 0.15:
+                scored.append((jaccard, c))
+
+        if not scored:
+            return ""
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        relevant = [c for _, c in scored[:5]]
+
         lines = ["PAST CORRECTIONS (learn from these):\n"]
-        for c in relevant[:5]:
+        for c in relevant:
             lines.append(f"  User asked: {c.original_prompt}")
             if c.original_sql:
                 lines.append(f"  Wrong SQL: {c.original_sql}")

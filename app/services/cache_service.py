@@ -1,10 +1,12 @@
-"""Redis Cache Service"""
+"""Async Redis Cache Service"""
 
-import redis
 import json
 import logging
-from app.config import Settings
 from typing import Any, Optional
+
+import redis.asyncio as aioredis
+
+from app.config import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -12,66 +14,67 @@ settings = Settings()
 
 
 class CacheService:
-    """Service for caching with Redis"""
-    
+    """Async Redis cache used for SQL-level and result-level caching."""
+
     def __init__(self):
-        self.redis_client = redis.from_url(settings.REDIS_URL)
-    
+        self._redis: Optional[aioredis.Redis] = None
+
+    async def _get_redis(self) -> aioredis.Redis:
+        if self._redis is None:
+            self._redis = aioredis.from_url(
+                settings.REDIS_URL,
+                decode_responses=True,
+                socket_connect_timeout=5,
+            )
+        return self._redis
+
     async def get(self, key: str) -> Optional[Any]:
-        """Get value from cache"""
-        
         try:
-            value = self.redis_client.get(key)
+            r = await self._get_redis()
+            value = await r.get(key)
             if value:
                 return json.loads(value)
             return None
         except Exception as e:
-            logger.error(f"Error getting cache key {key}: {str(e)}")
+            logger.debug("Cache GET miss/error for %s: %s", key, e)
             return None
-    
-    async def set(
-        self,
-        key: str,
-        value: Any,
-        ttl: int = 3600  # Default 1 hour
-    ):
-        """Set value in cache"""
-        
+
+    async def set(self, key: str, value: Any, ttl: int = 3600):
         try:
-            self.redis_client.setex(
-                key,
-                ttl,
-                json.dumps(value)
-            )
-            logger.debug(f"Cached key {key} with TTL {ttl}s")
+            r = await self._get_redis()
+            await r.setex(key, ttl, json.dumps(value, default=str))
         except Exception as e:
-            logger.error(f"Error setting cache key {key}: {str(e)}")
-    
+            logger.debug("Cache SET error for %s: %s", key, e)
+
     async def delete(self, key: str):
-        """Delete value from cache"""
-        
         try:
-            self.redis_client.delete(key)
-            logger.debug(f"Deleted cache key {key}")
+            r = await self._get_redis()
+            await r.delete(key)
         except Exception as e:
-            logger.error(f"Error deleting cache key {key}: {str(e)}")
-    
+            logger.debug("Cache DELETE error for %s: %s", key, e)
+
     async def clear_pattern(self, pattern: str):
-        """Delete all keys matching pattern"""
-        
+        """Delete keys matching *pattern* using SCAN (production-safe)."""
         try:
-            keys = self.redis_client.keys(pattern)
-            if keys:
-                self.redis_client.delete(*keys)
-                logger.debug(f"Cleared {len(keys)} keys matching {pattern}")
+            r = await self._get_redis()
+            cursor = 0
+            while True:
+                cursor, keys = await r.scan(cursor, match=pattern, count=200)
+                if keys:
+                    await r.delete(*keys)
+                if cursor == 0:
+                    break
         except Exception as e:
-            logger.error(f"Error clearing cache pattern {pattern}: {str(e)}")
-    
+            logger.debug("Cache CLEAR error for %s: %s", pattern, e)
+
     async def health_check(self) -> bool:
-        """Check if Redis is running"""
-        
         try:
-            self.redis_client.ping()
-            return True
-        except:
+            r = await self._get_redis()
+            return await r.ping()
+        except Exception:
             return False
+
+    async def close(self):
+        if self._redis:
+            await self._redis.close()
+            self._redis = None

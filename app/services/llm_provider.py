@@ -2,8 +2,12 @@
 
 Supports: ollama_local, openai, anthropic, custom (any OpenAI-compatible API).
 Provider can be switched at runtime via the admin API or .env config.
+
+All providers share a persistent httpx.AsyncClient per instance and apply
+automatic retry with exponential backoff on transient failures.
 """
 
+import asyncio
 import httpx
 import json
 import logging
@@ -17,6 +21,33 @@ logger = logging.getLogger(__name__)
 settings = Settings()
 
 _THINK_RE = re.compile(r'<think>.*?</think>', re.DOTALL)
+
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = 0.5
+_RETRYABLE = (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError)
+
+
+async def _with_retry(coro_factory, label: str = "LLM"):
+    """Execute an async call with retry + exponential backoff on transient errors."""
+    last_error: Exception | None = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            return await coro_factory()
+        except _RETRYABLE as exc:
+            last_error = exc
+            if attempt < _MAX_RETRIES - 1:
+                delay = _RETRY_BACKOFF * (2 ** attempt)
+                logger.warning("%s retry %d/%d after %.1fs: %s",
+                               label, attempt + 1, _MAX_RETRIES, delay, exc)
+                await asyncio.sleep(delay)
+    raise last_error  # type: ignore[misc]
+
+
+def _shared_client(timeout: float) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        timeout=timeout,
+        limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+    )
 
 
 class LLMProvider(ABC):
@@ -44,6 +75,7 @@ class OllamaLocalProvider(LLMProvider):
         self.base_url = (base_url or settings.OLLAMA_URL).rstrip("/")
         self.model = model or settings.OLLAMA_LLM_MODEL
         self.timeout = timeout or settings.LLM_TIMEOUT_SEC
+        self._client = _shared_client(self.timeout)
 
     async def chat(self, messages: list, temperature: float = 0.0,
                    max_tokens: int = 512) -> str:
@@ -53,16 +85,22 @@ class OllamaLocalProvider(LLMProvider):
             "stream": False,
             "options": {"temperature": temperature, "num_predict": max_tokens},
         }
-        async with httpx.AsyncClient() as client:
-            r = await client.post(f"{self.base_url}/api/chat", json=payload,
-                                  timeout=self.timeout)
-        if r.status_code != 200:
-            logger.error("Ollama local error %d: %s", r.status_code, r.text[:300])
-            raise Exception(f"Ollama returned status {r.status_code}")
-        data = r.json()
-        content = data.get("message", {}).get("content", "").strip()
-        content = _THINK_RE.sub("", content).strip()
-        return content
+
+        async def _call():
+            r = await self._client.post(
+                f"{self.base_url}/api/chat", json=payload,
+            )
+            if r.status_code != 200:
+                logger.error("Ollama local error %d: %s", r.status_code, r.text[:300])
+                raise httpx.HTTPStatusError(
+                    f"Ollama returned status {r.status_code}",
+                    request=r.request, response=r,
+                )
+            data = r.json()
+            content = data.get("message", {}).get("content", "").strip()
+            return _THINK_RE.sub("", content).strip()
+
+        return await _with_retry(_call, label="Ollama")
 
     async def stream_chat(self, messages: list, temperature: float = 0.0,
                           max_tokens: int = 512) -> AsyncIterator[str]:
@@ -72,25 +110,23 @@ class OllamaLocalProvider(LLMProvider):
             "stream": True,
             "options": {"temperature": temperature, "num_predict": max_tokens},
         }
-        async with httpx.AsyncClient() as client:
-            async with client.stream("POST", f"{self.base_url}/api/chat",
-                                     json=payload, timeout=self.timeout) as resp:
-                async for line in resp.aiter_lines():
-                    if not line:
-                        continue
-                    try:
-                        chunk = json.loads(line)
-                        token = chunk.get("message", {}).get("content", "")
-                        if token:
-                            yield token
-                    except json.JSONDecodeError:
-                        continue
+        async with self._client.stream("POST", f"{self.base_url}/api/chat",
+                                        json=payload) as resp:
+            async for line in resp.aiter_lines():
+                if not line:
+                    continue
+                try:
+                    chunk = json.loads(line)
+                    token = chunk.get("message", {}).get("content", "")
+                    if token:
+                        yield token
+                except json.JSONDecodeError:
+                    continue
 
     async def health(self) -> bool:
         try:
-            async with httpx.AsyncClient() as c:
-                r = await c.get(f"{self.base_url}/api/tags", timeout=10)
-                return r.status_code == 200
+            r = await self._client.get(f"{self.base_url}/api/tags", timeout=10)
+            return r.status_code == 200
         except Exception:
             return False
 
@@ -104,6 +140,7 @@ class OpenAICompatProvider(LLMProvider):
         self.model = model or settings.LLM_MODEL_NAME
         self.api_key = api_key or ""
         self.timeout = timeout or settings.LLM_TIMEOUT_SEC
+        self._client = _shared_client(self.timeout)
 
     def _headers(self):
         h = {"Content-Type": "application/json"}
@@ -119,19 +156,27 @@ class OpenAICompatProvider(LLMProvider):
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
-        async with httpx.AsyncClient() as client:
-            r = await client.post(self.api_url, json=payload,
-                                  headers=self._headers(), timeout=self.timeout)
-        if r.status_code != 200:
-            logger.error("OpenAI-compat error %d: %s", r.status_code, r.text[:300])
-            raise Exception(f"LLM API returned status {r.status_code}")
-        data = r.json()
-        content = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-        content = _THINK_RE.sub("", content).strip()
-        usage = data.get("usage", {})
-        logger.debug("LLM tokens: prompt=%s completion=%s",
-                     usage.get("prompt_tokens", "?"), usage.get("completion_tokens", "?"))
-        return content
+        headers = self._headers()
+
+        async def _call():
+            r = await self._client.post(
+                self.api_url, json=payload, headers=headers,
+            )
+            if r.status_code != 200:
+                logger.error("OpenAI-compat error %d: %s", r.status_code, r.text[:300])
+                raise httpx.HTTPStatusError(
+                    f"LLM API returned status {r.status_code}",
+                    request=r.request, response=r,
+                )
+            data = r.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            content = _THINK_RE.sub("", content).strip()
+            usage = data.get("usage", {})
+            logger.debug("LLM tokens: prompt=%s completion=%s",
+                         usage.get("prompt_tokens", "?"), usage.get("completion_tokens", "?"))
+            return content
+
+        return await _with_retry(_call, label="OpenAI-compat")
 
     async def stream_chat(self, messages: list, temperature: float = 0.0,
                           max_tokens: int = 512) -> AsyncIterator[str]:
@@ -142,33 +187,31 @@ class OpenAICompatProvider(LLMProvider):
             "max_tokens": max_tokens,
             "stream": True,
         }
-        async with httpx.AsyncClient() as client:
-            async with client.stream("POST", self.api_url, json=payload,
-                                     headers=self._headers(), timeout=self.timeout) as resp:
-                async for line in resp.aiter_lines():
-                    line = line.strip()
-                    if not line or line == "data: [DONE]":
-                        continue
-                    if line.startswith("data: "):
-                        line = line[6:]
-                    try:
-                        chunk = json.loads(line)
-                        delta = chunk.get("choices", [{}])[0].get("delta", {})
-                        token = delta.get("content", "")
-                        if token:
-                            yield token
-                    except json.JSONDecodeError:
-                        continue
+        async with self._client.stream("POST", self.api_url, json=payload,
+                                        headers=self._headers()) as resp:
+            async for line in resp.aiter_lines():
+                line = line.strip()
+                if not line or line == "data: [DONE]":
+                    continue
+                if line.startswith("data: "):
+                    line = line[6:]
+                try:
+                    chunk = json.loads(line)
+                    delta = chunk.get("choices", [{}])[0].get("delta", {})
+                    token = delta.get("content", "")
+                    if token:
+                        yield token
+                except json.JSONDecodeError:
+                    continue
 
     async def health(self) -> bool:
         try:
-            async with httpx.AsyncClient() as c:
-                r = await c.post(self.api_url, json={
-                    "model": self.model,
-                    "messages": [{"role": "user", "content": "ping"}],
-                    "max_tokens": 1,
-                }, headers=self._headers(), timeout=15)
-                return r.status_code == 200
+            r = await self._client.post(self.api_url, json={
+                "model": self.model,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+            }, headers=self._headers(), timeout=15)
+            return r.status_code == 200
         except Exception:
             return False
 
@@ -182,6 +225,7 @@ class AnthropicProvider(LLMProvider):
         self.model = model
         self.timeout = timeout or 120.0
         self.base_url = "https://api.anthropic.com/v1/messages"
+        self._client = _shared_client(self.timeout)
 
     def _headers(self):
         return {
@@ -205,15 +249,25 @@ class AnthropicProvider(LLMProvider):
         if system_text.strip():
             payload["system"] = system_text.strip()
 
-        async with httpx.AsyncClient() as client:
-            r = await client.post(self.base_url, json=payload,
-                                  headers=self._headers(), timeout=self.timeout)
-        if r.status_code != 200:
-            logger.error("Anthropic error %d: %s", r.status_code, r.text[:300])
-            raise Exception(f"Anthropic API returned status {r.status_code}")
-        data = r.json()
-        blocks = data.get("content", [])
-        return " ".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip()
+        headers = self._headers()
+
+        async def _call():
+            r = await self._client.post(
+                self.base_url, json=payload, headers=headers,
+            )
+            if r.status_code != 200:
+                logger.error("Anthropic error %d: %s", r.status_code, r.text[:300])
+                raise httpx.HTTPStatusError(
+                    f"Anthropic API returned status {r.status_code}",
+                    request=r.request, response=r,
+                )
+            data = r.json()
+            blocks = data.get("content", [])
+            return " ".join(
+                b.get("text", "") for b in blocks if b.get("type") == "text"
+            ).strip()
+
+        return await _with_retry(_call, label="Anthropic")
 
     async def stream_chat(self, messages: list, temperature: float = 0.0,
                           max_tokens: int = 512) -> AsyncIterator[str]:
@@ -230,21 +284,20 @@ class AnthropicProvider(LLMProvider):
         if system_text.strip():
             payload["system"] = system_text.strip()
 
-        async with httpx.AsyncClient() as client:
-            async with client.stream("POST", self.base_url, json=payload,
-                                     headers=self._headers(), timeout=self.timeout) as resp:
-                async for line in resp.aiter_lines():
-                    line = line.strip()
-                    if not line or not line.startswith("data: "):
-                        continue
-                    try:
-                        event = json.loads(line[6:])
-                        if event.get("type") == "content_block_delta":
-                            token = event.get("delta", {}).get("text", "")
-                            if token:
-                                yield token
-                    except json.JSONDecodeError:
-                        continue
+        async with self._client.stream("POST", self.base_url, json=payload,
+                                        headers=self._headers()) as resp:
+            async for line in resp.aiter_lines():
+                line = line.strip()
+                if not line or not line.startswith("data: "):
+                    continue
+                try:
+                    event = json.loads(line[6:])
+                    if event.get("type") == "content_block_delta":
+                        token = event.get("delta", {}).get("text", "")
+                        if token:
+                            yield token
+                except json.JSONDecodeError:
+                    continue
 
     async def health(self) -> bool:
         return bool(self.api_key)

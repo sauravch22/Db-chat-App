@@ -324,8 +324,8 @@ async def chat(
                            connection_id=request.connection_id, status="failed",
                            detail={"prompt": request.prompt[:200], "error": str(e)[:300]},
                            duration_ms=dur)
-        logger.error(f"Chat endpoint error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Chat endpoint error: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Chat query processing failed")
 
 
 @router.post("/stream")
@@ -513,11 +513,8 @@ async def execute_query(
                            connection_id=request.connection_id, status="failed",
                            detail={"sql": request.sql[:200], "error": str(e)[:300]},
                            duration_ms=dur)
-        logger.error(f"Execute endpoint error: {str(e)}", exc_info=True)
-        return ExecuteResponse(
-            success=False,
-            error=str(e)
-        )
+        logger.error("Execute endpoint error: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Query execution failed")
 
 
 # ══════════════════════════════════════════════════════
@@ -579,8 +576,8 @@ async def explain_query(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Explain endpoint error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Explain endpoint error: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="SQL explanation failed")
 
 
 # ══════════════════════════════════════════════════════

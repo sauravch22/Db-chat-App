@@ -191,3 +191,13 @@ app.include_router(knowledge_graph.router, tags=["Knowledge Graph"])
 @app.get("/")
 async def root():
     return {"message": "DbChat API", "version": "1.0.0", "docs": "/docs"}
+
+
+@app.get("/metrics")
+async def metrics():
+    from app.services.metrics import PROMETHEUS_AVAILABLE, generate_latest, CONTENT_TYPE_LATEST
+    if not PROMETHEUS_AVAILABLE:
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse("prometheus_client not installed", status_code=501)
+    from fastapi.responses import Response
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
