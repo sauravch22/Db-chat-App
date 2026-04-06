@@ -414,6 +414,80 @@ Provide insight bullets:"""
             logger.error(f"Error summarizing data: {e}")
             return ""
 
+    async def rerank_tables(
+        self, user_prompt: str, candidate_summaries: list, top_k: int = 5,
+    ) -> list:
+        """Rerank a pre-filtered candidate set of tables by relevance.
+
+        Args:
+            user_prompt: The user's natural language question.
+            candidate_summaries: [{name, summary}] from vector retrieval (bounded size).
+            top_k: Max tables to return.
+
+        Returns:
+            [{"table": name, "confidence": 0.0–1.0}] sorted desc, or [] on failure.
+        """
+        if not candidate_summaries:
+            return []
+
+        summaries_text = "\n".join(
+            f"- {t['name']}: {t['summary']}" for t in candidate_summaries
+        )
+
+        system_prompt = (
+            "You are a database table selector. Given a user question and candidate tables, "
+            "score each table's relevance from 0.0 to 1.0 and return ONLY the tables needed "
+            "to answer the question.\n\n"
+            "Rules:\n"
+            "1. Return a JSON array of objects with 'table' and 'confidence' keys\n"
+            "2. Only include tables with confidence >= 0.3\n"
+            "3. Consider which tables need to be JOINed together to answer the question\n"
+            "4. Sort by confidence descending\n"
+            f"5. Return at most {top_k} tables\n"
+            "6. Return ONLY valid JSON — no markdown, no explanation"
+        )
+
+        prompt = (
+            f"User Question: {user_prompt}\n\n"
+            f"Candidate Tables:\n{summaries_text}\n\n"
+            'Return JSON array (e.g., [{"table": "orders", "confidence": 0.95}, ...]):'
+        )
+
+        try:
+            raw = await self._call_chat_completions(
+                system_prompt, prompt, max_tokens=256, role="classify",
+            )
+            raw = raw.replace("```json", "").replace("```", "").strip()
+
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                start = raw.find("[")
+                end = raw.rfind("]")
+                if start != -1 and end != -1 and end > start:
+                    parsed = json.loads(raw[start : end + 1])
+                else:
+                    return []
+
+            if not isinstance(parsed, list):
+                return []
+
+            valid_names = {t["name"] for t in candidate_summaries}
+            result = []
+            for item in parsed:
+                if isinstance(item, dict) and "table" in item:
+                    name = str(item["table"])
+                    if name in valid_names:
+                        confidence = float(item.get("confidence", 0.5))
+                        result.append({"table": name, "confidence": confidence})
+
+            result.sort(key=lambda x: x["confidence"], reverse=True)
+            return result[:top_k]
+
+        except Exception as e:
+            logger.error("Error reranking tables: %s", e)
+            return []
+
     async def identify_tables(self, user_prompt: str, table_summaries: list) -> list:
         """Identify relevant tables from provided summaries. Returns list of exact table names."""
         if not table_summaries:

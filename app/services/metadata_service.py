@@ -341,6 +341,37 @@ class MetadataService:
         
         return join_conditions
 
+    def get_fk_bridge_tables(
+        self, connection_id: int, selected_tables: List[str],
+    ) -> List[str]:
+        """Return intermediate tables needed to join the selected tables.
+
+        For each pair of selected tables, finds the FK shortest path and
+        collects any intermediate tables not already in *selected_tables*.
+        """
+        database = self.db.query(Database).filter(
+            Database.connection_id == connection_id
+        ).first()
+        if not database:
+            return []
+
+        fk_graph = self._load_fk_graph(database.id)
+        if not fk_graph:
+            return []
+
+        bridge: Set[str] = set()
+        selected_set = set(selected_tables)
+
+        for i, t1 in enumerate(selected_tables):
+            for t2 in selected_tables[i + 1 :]:
+                path = self._find_join_path(database.id, fk_graph, t1, t2)
+                if path:
+                    for intermediate in path:
+                        if intermediate not in selected_set:
+                            bridge.add(intermediate)
+
+        return list(bridge)
+
     def close(self):
         if self.db:
             self.db.close()

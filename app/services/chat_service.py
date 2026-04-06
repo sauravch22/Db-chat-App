@@ -378,43 +378,81 @@ class ChatService:
                         qid, blocked, user_id)
         return filtered
 
-    # ── Table selection helpers ────────────────────────────
+    # ── Table selection (retrieve → rerank → expand) ──────
 
     async def _select_tables(
         self, qid: str, user_prompt: str, prompt_embedding: list,
         connection_id: int, top_k: int,
     ) -> List[str]:
-        """Select relevant tables via LLM identification with vector fallback."""
+        """Select relevant tables using retrieve-then-rerank with FK expansion.
+
+        Stage 1 — Vector retrieval: fast Qdrant search produces a broad
+                  candidate pool (~4× top_k, capped at 20).
+        Stage 2 — LLM reranking: the LLM scores only the small candidate set
+                  (bounded input, per-table confidence).
+        Stage 3 — FK expansion: bridge tables needed for joins are added
+                  automatically from the foreign-key graph.
+        """
+        pool_size = max(top_k * 4, 20)
+
+        # ── Stage 1: vector candidate retrieval ──
+        candidates = await self._vector_candidate_retrieval(
+            qid, prompt_embedding, connection_id, pool_size,
+        )
+        if not candidates:
+            logger.warning("[%s] Stage 1: vector search returned no candidates", qid)
+            return []
+
+        candidate_names = [c["name"] for c in candidates]
+        logger.debug("[%s] Stage 1: %d vector candidates: %s",
+                     qid, len(candidate_names), candidate_names)
+
+        # ── Stage 2: LLM reranking on candidate set ──
         table_summaries = self.metadata.get_table_summaries(connection_id)
+        candidate_set = set(candidate_names)
+        candidate_summaries = [
+            s for s in table_summaries if s["name"] in candidate_set
+        ]
 
-        if table_summaries:
-            allowed = {t["name"] for t in table_summaries}
-            identified = await self.ollama.identify_tables(user_prompt, table_summaries)
-            identified = [t for t in identified if t in allowed][:max(top_k, 5)]
-            if identified:
-                summary_text = "\n".join(
-                    t["summary"] for t in table_summaries if t["name"] in identified
-                )
-                sim = await self.ollama.verify_intent_similarity(
-                    prompt_embedding, summary_text,
-                )
-                if sim >= SIMILARITY_THRESHOLD:
-                    logger.debug("[%s] LLM table selection accepted (sim=%.2f)", qid, sim)
-                    return identified
-                logger.debug("[%s] LLM table selection rejected (sim=%.2f)", qid, sim)
+        selected: List[str] = []
+        if candidate_summaries:
+            ranked = await self.ollama.rerank_tables(
+                user_prompt, candidate_summaries, top_k,
+            )
+            if ranked:
+                selected = [r["table"] for r in ranked]
+                logger.debug("[%s] Stage 2: LLM reranked → %s", qid, selected)
 
-        return await self._vector_table_search(qid, prompt_embedding, connection_id, top_k)
+        if not selected:
+            selected = candidate_names[:top_k]
+            logger.debug("[%s] Stage 2: LLM rerank empty, falling back to vector top-%d",
+                         qid, top_k)
 
-    async def _vector_table_search(
-        self, qid: str, embedding: list, connection_id: int, top_k: int,
-    ) -> List[str]:
-        """Fallback table selection via vector similarity search."""
-        table_names: List[str] = []
+        # ── Stage 3: FK bridge expansion ──
+        bridge_tables = self.metadata.get_fk_bridge_tables(connection_id, selected)
+        if bridge_tables:
+            max_expansion = top_k + 3
+            for bt in bridge_tables:
+                if bt not in selected and len(selected) < max_expansion:
+                    selected.append(bt)
+            logger.debug("[%s] Stage 3: FK expansion added %s → %s",
+                         qid, bridge_tables, selected)
+
+        return selected
+
+    async def _vector_candidate_retrieval(
+        self, qid: str, embedding: list, connection_id: int, pool_size: int,
+    ) -> List[Dict[str, Any]]:
+        """Stage 1: retrieve candidate tables via vector similarity.
+
+        Returns [{"name": table_name, "score": float}] ordered by score desc.
+        """
         seen: set = set()
+        candidates: List[Dict[str, Any]] = []
 
         results = await self.vector.search(
             embedding=embedding,
-            top_k=top_k * VECTOR_SEARCH_MULTIPLIER,
+            top_k=pool_size * VECTOR_SEARCH_MULTIPLIER,
             filters={"must": [
                 {"key": "connection_id", "match": {"value": connection_id}},
                 {"key": "type", "match": {"value": "table"}},
@@ -424,30 +462,31 @@ class ChatService:
 
         for r in results:
             tbl = r.get("payload", {}).get("table_name")
+            score = r.get("score", 0.0)
             if tbl and tbl not in seen:
-                table_names.append(tbl)
+                candidates.append({"name": tbl, "score": score})
                 seen.add(tbl)
-                if len(table_names) >= top_k:
-                    return table_names
+                if len(candidates) >= pool_size:
+                    return candidates
 
-        # Broaden to mixed table+column embeddings if not enough
-        if len(table_names) < top_k:
+        if len(candidates) < pool_size:
             mixed = await self.vector.search(
                 embedding=embedding,
-                top_k=top_k * VECTOR_SEARCH_MULTIPLIER,
+                top_k=pool_size * VECTOR_SEARCH_MULTIPLIER,
                 filters={"must": [
                     {"key": "connection_id", "match": {"value": connection_id}},
                 ]},
             )
             for r in mixed:
                 tbl = r.get("payload", {}).get("table_name")
+                score = r.get("score", 0.0)
                 if tbl and tbl not in seen:
-                    table_names.append(tbl)
+                    candidates.append({"name": tbl, "score": score})
                     seen.add(tbl)
-                    if len(table_names) >= top_k:
+                    if len(candidates) >= pool_size:
                         break
 
-        return table_names
+        return candidates
 
     # ── SQL generation ────────────────────────────────────
 
