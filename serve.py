@@ -14,7 +14,7 @@ from app.api.routes import (chat, admin, health, auth, activity, dashboard,
                             nosql, connection_test, file_upload, erd,
                             training, optimizer, data_quality,
                             api_generator, migration, pipeline,
-                            collab, embed)
+                            collab, embed, knowledge_graph)
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -183,6 +183,7 @@ app.include_router(migration.router, tags=["Schema Migration"])
 app.include_router(pipeline.router, tags=["Data Pipeline"])
 app.include_router(collab.router, tags=["Collaboration"])
 app.include_router(embed.router, tags=["Embeddable Widget"])
+app.include_router(knowledge_graph.router, tags=["Knowledge Graph"])
 
 
 @app.get("/")

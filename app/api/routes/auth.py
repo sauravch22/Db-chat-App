@@ -18,7 +18,7 @@ from app.services.auth_service import (
 )
 from app.services.activity_service import log_activity, Actions
 from app.api.deps import get_current_user, is_db_admin, has_any_onboard
-from app.models import User, UserPermission, Connection
+from app.models import User, UserPermission, Connection, TableAccess
 
 logger = logging.getLogger(__name__)
 
@@ -292,3 +292,117 @@ async def available_permissions():
             "prompt_query": "Can query a database (chat and view charts)",
         },
     }
+
+
+# ── Table-level access control ───────────────────────
+
+
+class TableAccessRequest(BaseModel):
+    user_id: int
+    connection_id: int
+    tables: List[str]
+
+
+@router.get("/table-access/{connection_id}/{user_id}")
+async def get_table_access(
+    connection_id: int,
+    user_id: int,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return the table allowlist for a user on a connection.
+
+    Empty list means the user can see ALL tables (no restrictions).
+    """
+    if not is_db_admin(current_user, connection_id):
+        raise HTTPException(403, "Only admins of this database can view table access")
+
+    rows = (
+        db.query(TableAccess)
+        .filter(
+            TableAccess.user_id == user_id,
+            TableAccess.connection_id == connection_id,
+        )
+        .order_by(TableAccess.table_name)
+        .all()
+    )
+    return {
+        "user_id": user_id,
+        "connection_id": connection_id,
+        "allowed_tables": [r.table_name for r in rows],
+        "mode": "restricted" if rows else "all",
+    }
+
+
+@router.put("/table-access")
+async def set_table_access(
+    request: TableAccessRequest,
+    req: Request,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Set the table allowlist for a user on a connection.
+
+    Pass an empty `tables` list to remove restrictions (allow all).
+    Pass a non-empty list to restrict the user to only those tables.
+    """
+    if not is_db_admin(current_user, request.connection_id):
+        raise HTTPException(403, "Only admins of this database can manage table access")
+
+    user = db.query(User).filter(User.id == request.user_id).first()
+    if not user:
+        raise HTTPException(404, "User not found")
+
+    db.query(TableAccess).filter(
+        TableAccess.user_id == request.user_id,
+        TableAccess.connection_id == request.connection_id,
+    ).delete()
+
+    admin_id = int(current_user["sub"])
+    for tbl in request.tables:
+        db.add(TableAccess(
+            user_id=request.user_id,
+            connection_id=request.connection_id,
+            table_name=tbl.strip(),
+            created_by=admin_id,
+        ))
+    db.commit()
+
+    await log_activity(
+        req, user=current_user, action=Actions.UPDATE_PERM,
+        connection_id=request.connection_id,
+        resource_type="table_access", resource_id=request.user_id,
+        detail={
+            "target_user": user.username,
+            "tables": request.tables,
+            "mode": "restricted" if request.tables else "all",
+        },
+        db=db,
+    )
+
+    return {
+        "user_id": request.user_id,
+        "connection_id": request.connection_id,
+        "allowed_tables": request.tables,
+        "mode": "restricted" if request.tables else "all",
+    }
+
+
+@router.get("/table-access/available/{connection_id}")
+async def list_available_tables(
+    connection_id: int,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """List all indexed tables for a connection (for the admin UI picker)."""
+    if not is_db_admin(current_user, connection_id):
+        raise HTTPException(403, "Only admins can view this")
+
+    from app.models import Table
+    tables = (
+        db.query(Table.name)
+        .filter(Table.connection_id == connection_id)
+        .order_by(Table.name)
+        .all()
+    )
+    return {"connection_id": connection_id, "tables": [t[0] for t in tables]}

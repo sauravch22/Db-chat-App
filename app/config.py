@@ -56,7 +56,46 @@ class Settings(BaseSettings):
     # SQL Generation - Reasoning Mode (Phase 3 Enhancement)
     # Enabled for Mistral - helps with reasoning steps before SQL generation
     USE_REASONING_MODE: bool = Field(default=True, alias="USE_REASONING_MODE")
-    
+
+    # ── Per-task model routing ──
+    # Each role can override the default provider/model.
+    # Format: LLM_ROLE_<ROLE>_PROVIDER, LLM_ROLE_<ROLE>_MODEL, LLM_ROLE_<ROLE>_API_URL, LLM_ROLE_<ROLE>_API_KEY
+    # Roles: classify, sql_generate, reasoning, summarize, nosql, explain, general
+    LLM_ROLE_CLASSIFY_PROVIDER: str = Field(default="", alias="LLM_ROLE_CLASSIFY_PROVIDER")
+    LLM_ROLE_CLASSIFY_MODEL: str = Field(default="", alias="LLM_ROLE_CLASSIFY_MODEL")
+    LLM_ROLE_CLASSIFY_API_URL: str = Field(default="", alias="LLM_ROLE_CLASSIFY_API_URL")
+    LLM_ROLE_CLASSIFY_API_KEY: str = Field(default="", alias="LLM_ROLE_CLASSIFY_API_KEY")
+
+    LLM_ROLE_SQL_GENERATE_PROVIDER: str = Field(default="", alias="LLM_ROLE_SQL_GENERATE_PROVIDER")
+    LLM_ROLE_SQL_GENERATE_MODEL: str = Field(default="", alias="LLM_ROLE_SQL_GENERATE_MODEL")
+    LLM_ROLE_SQL_GENERATE_API_URL: str = Field(default="", alias="LLM_ROLE_SQL_GENERATE_API_URL")
+    LLM_ROLE_SQL_GENERATE_API_KEY: str = Field(default="", alias="LLM_ROLE_SQL_GENERATE_API_KEY")
+
+    LLM_ROLE_REASONING_PROVIDER: str = Field(default="", alias="LLM_ROLE_REASONING_PROVIDER")
+    LLM_ROLE_REASONING_MODEL: str = Field(default="", alias="LLM_ROLE_REASONING_MODEL")
+    LLM_ROLE_REASONING_API_URL: str = Field(default="", alias="LLM_ROLE_REASONING_API_URL")
+    LLM_ROLE_REASONING_API_KEY: str = Field(default="", alias="LLM_ROLE_REASONING_API_KEY")
+
+    LLM_ROLE_SUMMARIZE_PROVIDER: str = Field(default="", alias="LLM_ROLE_SUMMARIZE_PROVIDER")
+    LLM_ROLE_SUMMARIZE_MODEL: str = Field(default="", alias="LLM_ROLE_SUMMARIZE_MODEL")
+    LLM_ROLE_SUMMARIZE_API_URL: str = Field(default="", alias="LLM_ROLE_SUMMARIZE_API_URL")
+    LLM_ROLE_SUMMARIZE_API_KEY: str = Field(default="", alias="LLM_ROLE_SUMMARIZE_API_KEY")
+
+    LLM_ROLE_NOSQL_PROVIDER: str = Field(default="", alias="LLM_ROLE_NOSQL_PROVIDER")
+    LLM_ROLE_NOSQL_MODEL: str = Field(default="", alias="LLM_ROLE_NOSQL_MODEL")
+    LLM_ROLE_NOSQL_API_URL: str = Field(default="", alias="LLM_ROLE_NOSQL_API_URL")
+    LLM_ROLE_NOSQL_API_KEY: str = Field(default="", alias="LLM_ROLE_NOSQL_API_KEY")
+
+    LLM_ROLE_EXPLAIN_PROVIDER: str = Field(default="", alias="LLM_ROLE_EXPLAIN_PROVIDER")
+    LLM_ROLE_EXPLAIN_MODEL: str = Field(default="", alias="LLM_ROLE_EXPLAIN_MODEL")
+    LLM_ROLE_EXPLAIN_API_URL: str = Field(default="", alias="LLM_ROLE_EXPLAIN_API_URL")
+    LLM_ROLE_EXPLAIN_API_KEY: str = Field(default="", alias="LLM_ROLE_EXPLAIN_API_KEY")
+
+    LLM_ROLE_GENERAL_PROVIDER: str = Field(default="", alias="LLM_ROLE_GENERAL_PROVIDER")
+    LLM_ROLE_GENERAL_MODEL: str = Field(default="", alias="LLM_ROLE_GENERAL_MODEL")
+    LLM_ROLE_GENERAL_API_URL: str = Field(default="", alias="LLM_ROLE_GENERAL_API_URL")
+    LLM_ROLE_GENERAL_API_KEY: str = Field(default="", alias="LLM_ROLE_GENERAL_API_KEY")
+
     model_config = {
         "env_file": ".env",
         "case_sensitive": True

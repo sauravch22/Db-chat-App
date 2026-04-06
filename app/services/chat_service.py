@@ -130,6 +130,7 @@ class ChatService:
         top_k_tables: int = 5,
         timeout: int = 30,
         thread_history: list = None,
+        user_id: int = None,
     ) -> Dict[str, Any]:
         qid = uuid.uuid4().hex[:8]
         start_time = time.time()
@@ -212,6 +213,18 @@ class ChatService:
                     "execution_time_ms": int((time.time() - start_time) * 1000),
                 }
 
+            # ── Table-level access filtering ──
+            if user_id:
+                table_names = self._filter_tables_by_access(
+                    user_id, connection_id, table_names, qid,
+                )
+                if not table_names:
+                    return {
+                        "status": "error",
+                        "error": "You don't have access to the tables needed for this query. Contact your admin.",
+                        "execution_time_ms": int((time.time() - start_time) * 1000),
+                    }
+
             logger.info("[%s] selected %d tables: %s", qid, len(table_names), table_names)
 
             # ── Schema context ──
@@ -224,6 +237,27 @@ class ChatService:
                     "execution_time_ms": int((time.time() - start_time) * 1000),
                 }
             logger.debug("[%s] Schema context: %d chars", qid, len(schema_context))
+
+            # ── Enrich with semantic knowledge (glossary + entity graph + corrections) ──
+            try:
+                from app.services.semantic_graph_service import SemanticGraphService
+                sem_db = SessionLocal()
+                try:
+                    sem = SemanticGraphService(sem_db)
+                    glossary_ctx = sem.build_glossary_context(connection_id)
+                    entity_ctx = sem.build_entity_context(connection_id)
+                    corrections_ctx = sem.build_corrections_context(connection_id, user_prompt)
+                    extra_ctx = "\n\n".join(
+                        part for part in (glossary_ctx, entity_ctx, corrections_ctx) if part
+                    )
+                    if extra_ctx:
+                        schema_context = schema_context + "\n\n" + extra_ctx
+                        logger.debug("[%s] Enriched schema with %d chars of semantic context",
+                                     qid, len(extra_ctx))
+                finally:
+                    sem_db.close()
+            except Exception as e:
+                logger.debug("[%s] Semantic enrichment skipped: %s", qid, e)
 
             # ── SQL generation ──
             sql, reasoning, llm_ms = await self._generate_sql(
@@ -309,6 +343,36 @@ class ChatService:
                 "error": f"Query processing failed: {str(e)}",
                 "execution_time_ms": elapsed,
             }
+
+    # ── Table access control ─────────────────────────────
+
+    def _filter_tables_by_access(
+        self, user_id: int, connection_id: int,
+        table_names: List[str], qid: str,
+    ) -> List[str]:
+        """Filter table list by the user's TableAccess allowlist.
+
+        If no rows exist for this user+connection, all tables are allowed.
+        """
+        from app.models import TableAccess
+        rows = (
+            self.db.query(TableAccess.table_name)
+            .filter(
+                TableAccess.user_id == user_id,
+                TableAccess.connection_id == connection_id,
+            )
+            .all()
+        )
+        if not rows:
+            return table_names
+
+        allowed = {r[0] for r in rows}
+        filtered = [t for t in table_names if t in allowed]
+        if len(filtered) < len(table_names):
+            blocked = set(table_names) - allowed
+            logger.info("[%s] Table access filter: blocked %s for user %d",
+                        qid, blocked, user_id)
+        return filtered
 
     # ── Table selection helpers ────────────────────────────
 

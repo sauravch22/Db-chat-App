@@ -282,7 +282,8 @@ async def chat(
                 connection_id=request.connection_id,
                 user_prompt=request.prompt,
                 top_k_tables=request.top_k_tables,
-                thread_history=thread_history if thread_history else None
+                thread_history=thread_history if thread_history else None,
+                user_id=int(user["sub"]),
             )
             dur = int((time.time() - t0) * 1000)
             await log_activity(req, user=user, action=Actions.CHAT_QUERY,
@@ -380,6 +381,7 @@ async def chat_stream(
                     user_prompt=request.prompt,
                     top_k_tables=request.top_k_tables,
                     thread_history=thread_history if thread_history else None,
+                    user_id=int(user["sub"]),
                 )
 
                 if result.get("sql"):

@@ -1,6 +1,6 @@
 """Database models for metadata storage"""
 
-from sqlalchemy import Column as SA_Column, Integer, String, Text, Boolean, DateTime, ForeignKey as SA_ForeignKey
+from sqlalchemy import Column as SA_Column, Integer, String, Text, Boolean, DateTime, ForeignKey as SA_ForeignKey, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -190,6 +190,32 @@ class UserPermission(Base):
     created_at = SA_Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="permissions")
+    connection = relationship("Connection")
+
+
+class TableAccess(Base):
+    """Per-table allowlist for a user on a connection.
+
+    Semantics:
+    - If NO rows exist for (user_id, connection_id) → user can see ALL tables.
+    - If ANY rows exist → user can ONLY see the listed tables/views.
+    This is an allowlist model; the moment you add one table,
+    all unlisted tables become invisible to that user.
+    """
+    __tablename__ = "table_access"
+    __table_args__ = (
+        UniqueConstraint("user_id", "connection_id", "table_name",
+                         name="uq_table_access_user_conn_table"),
+    )
+
+    id = SA_Column(Integer, primary_key=True)
+    user_id = SA_Column(Integer, SA_ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    connection_id = SA_Column(Integer, SA_ForeignKey("connections.id", ondelete="CASCADE"), nullable=False, index=True)
+    table_name = SA_Column(String(255), nullable=False)
+    created_at = SA_Column(DateTime, default=datetime.utcnow)
+    created_by = SA_Column(Integer, SA_ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+    user = relationship("User", foreign_keys=[user_id])
     connection = relationship("Connection")
 
 
@@ -504,4 +530,113 @@ class GeneratedEndpoint(Base):
     rate_limit = SA_Column(Integer, default=100)
     is_active = SA_Column(Boolean, default=True)
     call_count = SA_Column(Integer, default=0)
+    created_at = SA_Column(DateTime, default=datetime.utcnow)
+
+
+# ============================================================================
+# GLOBAL ENTITY GRAPH  –  cross-database semantic understanding
+# ============================================================================
+
+
+class EntityConcept(Base):
+    """A canonical business concept (e.g. 'Employee ID', 'Revenue')."""
+    __tablename__ = "entity_concepts"
+
+    id = SA_Column(Integer, primary_key=True)
+    name = SA_Column(String(255), nullable=False, unique=True, index=True)
+    description = SA_Column(Text, nullable=True)
+    category = SA_Column(String(100), nullable=True, index=True)
+    created_by = SA_Column(Integer, SA_ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = SA_Column(DateTime, default=datetime.utcnow)
+    updated_at = SA_Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    mappings = relationship("EntityMapping", back_populates="concept", cascade="all, delete")
+
+
+class EntityMapping(Base):
+    """Links a physical column to a canonical entity concept."""
+    __tablename__ = "entity_mappings"
+
+    id = SA_Column(Integer, primary_key=True)
+    concept_id = SA_Column(Integer, SA_ForeignKey("entity_concepts.id", ondelete="CASCADE"), nullable=False, index=True)
+    connection_id = SA_Column(Integer, SA_ForeignKey("connections.id", ondelete="CASCADE"), nullable=False, index=True)
+    table_name = SA_Column(String(255), nullable=False)
+    column_name = SA_Column(String(255), nullable=False)
+    confidence = SA_Column(Integer, default=100)
+    source = SA_Column(String(50), nullable=False, default="user")
+    verified_by = SA_Column(Integer, SA_ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    verified_at = SA_Column(DateTime, nullable=True)
+    created_at = SA_Column(DateTime, default=datetime.utcnow)
+
+    concept = relationship("EntityConcept", back_populates="mappings")
+
+
+class ColumnFingerprint(Base):
+    """Statistical fingerprint of a column for auto-entity detection."""
+    __tablename__ = "column_fingerprints"
+
+    id = SA_Column(Integer, primary_key=True)
+    connection_id = SA_Column(Integer, SA_ForeignKey("connections.id", ondelete="CASCADE"), nullable=False, index=True)
+    table_name = SA_Column(String(255), nullable=False)
+    column_name = SA_Column(String(255), nullable=False)
+    data_type = SA_Column(String(100), nullable=True)
+    cardinality = SA_Column(Integer, nullable=True)
+    null_ratio = SA_Column(Integer, default=0)
+    min_value = SA_Column(Text, nullable=True)
+    max_value = SA_Column(Text, nullable=True)
+    avg_length = SA_Column(Integer, nullable=True)
+    sample_values = SA_Column(Text, nullable=True)
+    pattern_class = SA_Column(String(50), nullable=True)
+    fingerprint_hash = SA_Column(String(64), nullable=True, index=True)
+    computed_at = SA_Column(DateTime, default=datetime.utcnow)
+
+
+# ============================================================================
+# BUSINESS GLOSSARY  –  shared organizational definitions
+# ============================================================================
+
+
+class GlossaryTerm(Base):
+    """Organization-wide business term definition."""
+    __tablename__ = "glossary_terms"
+
+    id = SA_Column(Integer, primary_key=True)
+    term = SA_Column(String(255), nullable=False, unique=True, index=True)
+    definition = SA_Column(Text, nullable=False)
+    sql_expression = SA_Column(Text, nullable=True)
+    category = SA_Column(String(100), nullable=True, index=True)
+    synonyms = SA_Column(Text, nullable=True)
+    created_by = SA_Column(Integer, SA_ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    upvotes = SA_Column(Integer, default=0)
+    created_at = SA_Column(DateTime, default=datetime.utcnow)
+    updated_at = SA_Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ColumnAnnotation(Base):
+    """User-contributed annotation explaining what a column means."""
+    __tablename__ = "column_annotations"
+
+    id = SA_Column(Integer, primary_key=True)
+    connection_id = SA_Column(Integer, SA_ForeignKey("connections.id", ondelete="CASCADE"), nullable=False, index=True)
+    table_name = SA_Column(String(255), nullable=False)
+    column_name = SA_Column(String(255), nullable=False)
+    annotation = SA_Column(Text, nullable=False)
+    annotated_by = SA_Column(Integer, SA_ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    upvotes = SA_Column(Integer, default=0)
+    created_at = SA_Column(DateTime, default=datetime.utcnow)
+
+
+class QueryCorrection(Base):
+    """Stores user corrections to learn from mistakes."""
+    __tablename__ = "query_corrections"
+
+    id = SA_Column(Integer, primary_key=True)
+    user_id = SA_Column(Integer, SA_ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    connection_id = SA_Column(Integer, SA_ForeignKey("connections.id", ondelete="CASCADE"), nullable=False, index=True)
+    original_prompt = SA_Column(Text, nullable=False)
+    original_sql = SA_Column(Text, nullable=True)
+    correction_text = SA_Column(Text, nullable=False)
+    corrected_sql = SA_Column(Text, nullable=True)
+    correction_type = SA_Column(String(50), nullable=True)
+    applied_count = SA_Column(Integer, default=0)
     created_at = SA_Column(DateTime, default=datetime.utcnow)

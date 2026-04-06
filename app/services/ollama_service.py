@@ -1,11 +1,16 @@
 """LLM Service — uses pluggable LLM provider for generation,
-local Ollama for embeddings only."""
+local Ollama for embeddings only.
+
+Each method routes to a task-specific LLM model via get_provider_for_role().
+Roles: classify, sql_generate, reasoning, summarize, nosql, explain, general.
+Falls back to the default provider when no role override is configured.
+"""
 
 import httpx
 import json
 import logging
 from app.config import Settings
-from app.services.llm_provider import get_provider
+from app.services.llm_provider import get_provider, get_provider_for_role
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +84,7 @@ Only read queries (MATCH ... RETURN) — no CREATE, DELETE, SET, MERGE.""",
         system = type_prompts.get(db_type.lower(), type_prompts["mongodb"])
         prompt = f"Schema:\n{schema_context}\n\nQuestion: {user_prompt}\n\nQuery:"
 
-        raw = await self._call_chat_completions(system, prompt, max_tokens=512)
+        raw = await self._call_chat_completions(system, prompt, max_tokens=512, role="nosql")
         raw = raw.replace("```json", "").replace("```", "").strip()
 
         if db_type.lower() in ("mongodb", "mongo", "elasticsearch", "elastic", "es"):
@@ -124,18 +129,22 @@ Only read queries (MATCH ... RETURN) — no CREATE, DELETE, SET, MERGE.""",
         sql = sql.rstrip('"').rstrip("'").strip()
         return sql
 
-    async def _call_chat_completions(self, system: str, user: str, temperature: float = 0.0, max_tokens: int = None) -> str:
-        """Call LLM via the pluggable provider."""
+    async def _call_chat_completions(self, system: str, user: str, temperature: float = 0.0,
+                                     max_tokens: int = None, role: str = "general") -> str:
+        """Call LLM via the pluggable provider, routed by task role."""
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
-        provider = get_provider()
+        provider = get_provider_for_role(role)
+        logger.debug("LLM call [role=%s] provider=%s", role, type(provider).__name__)
         return await provider.chat(messages, temperature, max_tokens or self.llm_max_tokens)
 
-    async def _call_chat_with_messages(self, messages: list, temperature: float = 0.0, max_tokens: int = None) -> str:
-        """Call LLM with a full messages array (for thread context)."""
-        provider = get_provider()
+    async def _call_chat_with_messages(self, messages: list, temperature: float = 0.0,
+                                       max_tokens: int = None, role: str = "general") -> str:
+        """Call LLM with a full messages array, routed by task role."""
+        provider = get_provider_for_role(role)
+        logger.debug("LLM call [role=%s] provider=%s", role, type(provider).__name__)
         return await provider.chat(messages, temperature, max_tokens or self.llm_max_tokens)
 
     async def generate_sql(
@@ -202,9 +211,9 @@ SQL query:"""
                 # Current prompt with full schema context
                 messages.append({"role": "user", "content": full_prompt})
                 logger.info(f"Thread-aware SQL generation: {len(thread_history)} prior exchanges")
-                raw = await self._call_chat_with_messages(messages)
+                raw = await self._call_chat_with_messages(messages, role="sql_generate")
             else:
-                raw = await self._call_chat_completions(system_prompt, full_prompt)
+                raw = await self._call_chat_completions(system_prompt, full_prompt, role="sql_generate")
 
             sql = self._clean_sql_output(raw)
             return sql
@@ -272,10 +281,11 @@ Analyze this question step-by-step. Answer these questions:
 Your analysis (be specific with table.column names):"""
 
         try:
-            logger.debug("Step 1 - Reasoning via provider")
+            logger.debug("Step 1 - Reasoning via provider (role=reasoning)")
             
-            # Step 1: Get reasoning
-            reasoning = await self._call_chat_completions(reasoning_system, reasoning_prompt, max_tokens=1024)
+            # Step 1: Get reasoning — uses the reasoning-optimized model
+            reasoning = await self._call_chat_completions(reasoning_system, reasoning_prompt,
+                                                          max_tokens=1024, role="reasoning")
             logger.info(f"LLM Reasoning (first 300 chars): {reasoning[:300]}...")
             
             # STEP 2: Generate SQL using the reasoning
@@ -304,13 +314,13 @@ Follow the structure and approach you identified.
 
 SQL query:"""
 
-            raw = await self._call_chat_completions(sql_system, sql_prompt)
+            # Step 2: SQL generation — uses the code/SQL-optimized model
+            raw = await self._call_chat_completions(sql_system, sql_prompt, role="sql_generate")
             sql = self._clean_sql_output(raw)
             return reasoning, sql
         
         except Exception as e:
             logger.error(f"Error in reasoning-based SQL generation: {str(e)}")
-            # Fallback to direct generation
             return "", await self.generate_sql(user_prompt, schema_context, sample_info)
 
     async def explain_sql(
@@ -349,7 +359,7 @@ Explain this query in plain English:"""
 
         try:
             explanation = await self._call_chat_completions(
-                system, prompt, temperature=0.3, max_tokens=512
+                system, prompt, temperature=0.3, max_tokens=512, role="explain"
             )
             return explanation
         except Exception as e:
@@ -398,7 +408,8 @@ Sample data (first {len(sample)} rows):
 Provide insight bullets:"""
 
         try:
-            return await self._call_chat_completions(system, prompt, temperature=0.3, max_tokens=400)
+            return await self._call_chat_completions(system, prompt, temperature=0.3,
+                                                     max_tokens=400, role="summarize")
         except Exception as e:
             logger.error(f"Error summarizing data: {e}")
             return ""
@@ -426,7 +437,8 @@ Provide insight bullets:"""
         )
 
         try:
-            raw = await self._call_chat_completions(system_prompt, prompt, max_tokens=256)
+            raw = await self._call_chat_completions(system_prompt, prompt, max_tokens=256,
+                                                    role="classify")
             raw = raw.replace("```json", "").replace("```", "").strip()
 
             # Try direct JSON parse
@@ -527,8 +539,8 @@ Provide insight bullets:"""
         )
 
         try:
-            logger.debug("Classify intent via provider")
-            out = await self._call_chat_completions(system, text, max_tokens=10)
+            logger.debug("Classify intent via provider (role=classify)")
+            out = await self._call_chat_completions(system, text, max_tokens=10, role="classify")
             out = out.strip().lower()
             if "catalog" in out:
                 return "catalog"
@@ -573,7 +585,8 @@ Return JSON:
 
         raw = ""
         try:
-            raw = await self._call_chat_completions(system, prompt, temperature=0.3, max_tokens=600)
+            raw = await self._call_chat_completions(system, prompt, temperature=0.3,
+                                                     max_tokens=600, role="general")
             logger.info(f"Welcome raw LLM response (first 500 chars): {raw[:500]}")
             # Strip <think>...</think> blocks (Qwen3 reasoning)
             import re as _re

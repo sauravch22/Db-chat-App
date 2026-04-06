@@ -24,6 +24,11 @@ let pinContext = { prompt: null, sql: null, chartType: null, chartConfig: null, 
 const chatUrl = () => document.getElementById('chatUrl').value;
 const vizUrl  = () => document.getElementById('vizUrl').value;
 
+function toggleSidebar() {
+    const nav = document.getElementById('sideNav');
+    if (nav) nav.classList.toggle('collapsed');
+}
+
 // ═════════════════════════════════════════════════════
 //  AUTH – Login / Logout / Token management
 // ═════════════════════════════════════════════════════
@@ -156,16 +161,10 @@ function showApp() {
     renderUserBadge();
     loadDatabases();
 
-    // Tab bar always visible; admin/reindex button only for privileged users
-    document.getElementById('tabBar').style.display = '';
+    // Sidebar admin section visibility
     const isAnyAdmin = _isAnyAdmin();
-    const canOnboard = Object.entries(_perms()).some(([, v]) => v.includes('db_onboard'));
-    const adminBtn = document.getElementById('tabAdmin');
-    adminBtn.style.display = isAnyAdmin ? '' : 'none';
-    adminBtn.textContent = canOnboard ? '👥 Admin' : '🔄 Reindex';
-    // Activity tab button label: admins see "Activity", regular users see "My Activity"
-    const actBtn = document.getElementById('tabActivity');
-    actBtn.textContent = isAnyAdmin ? '📋 Activity' : '📋 My Activity';
+    const adminGroup = document.getElementById('adminNavGroup');
+    if (adminGroup) adminGroup.style.display = isAnyAdmin ? '' : 'none';
     switchTab('chat');
 }
 
@@ -1332,12 +1331,12 @@ function switchTab(tab) {
                   'schemaTab', 'workbenchTab', 'lineageTab', 'intelligenceTab',
                   'templatesTab', 'crossdbTab', 'erdTab', 'qualityTab', 'optimizerTab',
                   'trainingTab', 'fileuploadTab', 'pipelineTab', 'apigenTab',
-                  'migrationTab', 'embedTab'];
+                  'migrationTab', 'embedTab', 'knowledgeTab', 'glossaryTab'];
     const btns = ['tabChat', 'tabAdmin', 'tabActivity', 'tabDashboard', 'tabSaved',
                   'tabSchema', 'tabWorkbench', 'tabLineage', 'tabIntelligence',
                   'tabTemplates', 'tabCrossDb', 'tabErd', 'tabQuality', 'tabOptimizer',
                   'tabTraining', 'tabFileUpload', 'tabPipeline', 'tabApiGen',
-                  'tabMigration', 'tabEmbed'];
+                  'tabMigration', 'tabEmbed', 'tabKnowledge', 'tabGlossary'];
 
     tabs.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
     btns.forEach(id => { const el = document.getElementById(id); if (el) el.classList.remove('active'); });
@@ -1365,6 +1364,7 @@ function switchTab(tab) {
         populateAdminDbSelector();
         populateReindexDbSelector();
         if (typeof loadLlmProviderSettings === 'function') loadLlmProviderSettings();
+        if (typeof loadModelRouting === 'function') loadModelRouting();
     } else if (tab === 'activity') {
         document.getElementById('activityTab').style.display = '';
         document.getElementById('tabActivity').classList.add('active');
@@ -1404,6 +1404,14 @@ function switchTab(tab) {
         document.getElementById('crossdbTab').style.display = '';
         document.getElementById('tabCrossDb').classList.add('active');
         if (typeof loadCrossDbConnections === 'function') loadCrossDbConnections();
+    } else if (tab === 'knowledge') {
+        document.getElementById('knowledgeTab').style.display = '';
+        document.getElementById('tabKnowledge').classList.add('active');
+        if (typeof loadKnowledgeTab === 'function') loadKnowledgeTab();
+    } else if (tab === 'glossary') {
+        document.getElementById('glossaryTab').style.display = '';
+        document.getElementById('tabGlossary').classList.add('active');
+        if (typeof loadGlossaryTab === 'function') loadGlossaryTab();
     } else if (simpleTabMap[tab]) {
         const m = simpleTabMap[tab];
         document.getElementById(m.tab).style.display = '';
@@ -1623,17 +1631,122 @@ function renderAdminUsers() {
             h += `</div>`;
         });
 
-        // View Logs button (global admins can view any user's logs)
-        if (_isGlobalAdmin()) {
-            h += `<button onclick="openUserActivityModal(${user.id}, '${esc(user.username)}')" class="text-[10px] px-2 py-1 rounded border border-d-border text-d-muted hover:text-white hover:border-d-accent transition" style="width:70px" title="View this user's activity log">📋 Logs</button>`;
-        } else {
-            h += `<span style="width:70px"></span>`;
-        }
+        h += `<div style="width:80px;text-align:center">`;
+        h += `<button onclick="openTableAccessModal(${user.id}, '${esc(user.username)}')" `;
+        h += `class="text-[10px] px-2 py-1 rounded border border-d-border text-d-muted hover:text-white hover:border-d-accent transition" title="Manage table access">🔒 Tables</button>`;
+        h += `</div>`;
 
         h += `<span class="save-status" id="save-${user.id}" style="width:60px;text-align:center">✓ Saved</span>`;
         h += `</div>`;
     });
     listEl.innerHTML = h;
+}
+
+// ── Table Access Modal ──────────────────────────────
+
+let _tableAccessUserId = null;
+let _tableAccessConnId = null;
+
+async function openTableAccessModal(userId, username) {
+    _tableAccessUserId = userId;
+    _tableAccessConnId = parseInt(document.getElementById('adminDbSelector').value);
+    if (!_tableAccessConnId) return;
+
+    document.getElementById('tableAccessUser').textContent = username;
+    document.getElementById('tableAccessModal').classList.add('open');
+
+    const listEl = document.getElementById('tableAccessList');
+    listEl.innerHTML = '<p class="text-xs text-d-muted">Loading tables…</p>';
+
+    try {
+        const [availRes, accessRes] = await Promise.all([
+            authFetch(`${chatUrl()}/api/auth/table-access/available/${_tableAccessConnId}`),
+            authFetch(`${chatUrl()}/api/auth/table-access/${_tableAccessConnId}/${userId}`),
+        ]);
+        const availData = await availRes.json();
+        const accessData = await accessRes.json();
+        const allTables = availData.tables || [];
+        const allowed = new Set(accessData.allowed_tables || []);
+        const isRestricted = accessData.mode === 'restricted';
+
+        if (!allTables.length) {
+            listEl.innerHTML = '<p class="text-xs text-d-muted">No indexed tables found. Reindex this database first.</p>';
+            return;
+        }
+
+        let h = '';
+        allTables.forEach(tbl => {
+            const checked = isRestricted ? allowed.has(tbl) : true;
+            h += `<label class="flex items-center gap-2 px-3 py-1.5 rounded hover:bg-d-hover cursor-pointer transition">`;
+            h += `<input type="checkbox" class="tbl-access-cb" value="${esc(tbl)}" ${checked ? 'checked' : ''} onchange="updateTableAccessCount()">`;
+            h += `<span class="text-xs text-d-text">${esc(tbl)}</span>`;
+            if (!isRestricted) h += `<span class="text-[10px] text-d-muted ml-auto">all access</span>`;
+            h += `</label>`;
+        });
+        listEl.innerHTML = h;
+        updateTableAccessCount();
+    } catch (e) {
+        listEl.innerHTML = `<p class="text-xs text-red-400">Error: ${e.message}</p>`;
+    }
+}
+
+function closeTableAccessModal() {
+    document.getElementById('tableAccessModal').classList.remove('open');
+}
+
+function tableAccessSelectAll() {
+    document.querySelectorAll('.tbl-access-cb').forEach(cb => { cb.checked = true; });
+    updateTableAccessCount();
+}
+
+function tableAccessSelectNone() {
+    document.querySelectorAll('.tbl-access-cb').forEach(cb => { cb.checked = false; });
+    updateTableAccessCount();
+}
+
+function updateTableAccessCount() {
+    const all = document.querySelectorAll('.tbl-access-cb');
+    const checked = document.querySelectorAll('.tbl-access-cb:checked');
+    const countEl = document.getElementById('tableAccessCount');
+    if (checked.length === 0 || checked.length === all.length) {
+        countEl.textContent = 'All tables (unrestricted)';
+        countEl.style.color = '#34d399';
+    } else {
+        countEl.textContent = `${checked.length} of ${all.length} tables selected`;
+        countEl.style.color = '#fbbf24';
+    }
+}
+
+async function saveTableAccess() {
+    const checked = document.querySelectorAll('.tbl-access-cb:checked');
+    const all = document.querySelectorAll('.tbl-access-cb');
+    const status = document.getElementById('tableAccessStatus');
+
+    let tables = [];
+    if (checked.length > 0 && checked.length < all.length) {
+        checked.forEach(cb => tables.push(cb.value));
+    }
+
+    try {
+        const r = await authFetch(`${chatUrl()}/api/auth/table-access`, {
+            method: 'PUT',
+            body: JSON.stringify({
+                user_id: _tableAccessUserId,
+                connection_id: _tableAccessConnId,
+                tables: tables,
+            }),
+        });
+        if (!r.ok) { const d = await r.json(); throw new Error(d.detail || 'Failed'); }
+        const d = await r.json();
+        status.textContent = d.mode === 'restricted'
+            ? `✓ Restricted to ${d.allowed_tables.length} tables`
+            : '✓ Full access (all tables)';
+        status.style.color = '#34d399';
+        setTimeout(() => { status.textContent = ''; }, 4000);
+    } catch (e) {
+        status.textContent = 'Error: ' + e.message;
+        status.style.color = '#f87171';
+    }
 }
 
 async function togglePerm(userId, perm, btnEl) {

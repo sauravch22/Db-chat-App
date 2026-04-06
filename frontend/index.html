@@ -103,11 +103,23 @@
         .auth-toggle{color:#7c6eff;cursor:pointer;font-size:13px;text-align:center;margin-top:16px}
         .auth-toggle:hover{text-decoration:underline}
 
+        /* ─── Sidebar Navigation ─── */
+        .sidebar{width:220px;background:#0f1117;border-right:1px solid #252938;display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden;flex-shrink:0;transition:width .2s ease}
+        .sidebar.collapsed{width:54px}
+        .sidebar-toggle{display:flex;align-items:center;justify-content:center;padding:8px;margin:6px 8px;border-radius:8px;cursor:pointer;color:#6b7084;background:none;border:none;transition:all .15s;font-size:16px}
+        .sidebar-toggle:hover{background:#1b1e27;color:#dfe1e8}
+        .nav-group{margin-bottom:2px}
+        .nav-label{font-size:10px;font-weight:700;color:#4a4f65;text-transform:uppercase;letter-spacing:.8px;padding:14px 16px 6px;user-select:none;white-space:nowrap;overflow:hidden}
+        .sidebar.collapsed .nav-label{font-size:0;padding:8px 0;border-bottom:1px solid #1a1d28;margin:0 12px}
+        .nav-item{display:flex;align-items:center;gap:10px;width:100%;padding:7px 16px;border:none;background:none;color:#8b8fa3;font-size:13px;font-weight:500;cursor:pointer;border-radius:0;transition:all .12s;text-align:left;white-space:nowrap;overflow:hidden}
+        .nav-item:hover{background:#1b1e27;color:#dfe1e8}
+        .nav-item.active{color:#c4b5fd;background:rgba(124,110,255,.1);border-right:3px solid #7c6eff;font-weight:600}
+        .nav-icon{width:20px;text-align:center;font-size:15px;flex-shrink:0}
+        .nav-text{overflow:hidden;text-overflow:ellipsis}
+        .sidebar.collapsed .nav-text{display:none}
+        .sidebar.collapsed .nav-item{justify-content:center;padding:9px 0}
+        .sidebar.collapsed .nav-icon{width:100%}
         /* ─── Admin panel ─── */
-        .tab-bar{display:flex;border-bottom:1px solid #252938;background:#0f1117}
-        .tab-btn{padding:10px 20px;font-size:13px;font-weight:600;color:#6b7084;cursor:pointer;border:none;background:none;border-bottom:2px solid transparent;transition:all .15s}
-        .tab-btn:hover{color:#dfe1e8}
-        .tab-btn.active{color:#7c6eff;border-bottom-color:#7c6eff}
         .admin-panel{background:#0f1117;border:1px solid #252938;border-radius:12px;overflow:hidden;margin-top:8px}
         .user-row{display:flex;align-items:center;gap:16px;padding:12px 20px;border-bottom:1px solid #1a1d28;transition:background .1s}
         .user-row:hover{background:#13161d}
@@ -202,10 +214,11 @@
 
     <!-- ═══════════ LOGIN / SIGNUP SCREEN ═══════════ -->
     <div id="loginScreen">
-        <div class="login-card">
-            <div class="flex items-center gap-3 mb-5">
-                <div class="w-10 h-10 rounded-xl bg-d-accent flex items-center justify-center text-white font-bold text-base">DB</div>
-                <div><h2>DbChat</h2><p style="margin:0" id="authSubtitle">Sign in to continue</p></div>
+        <div class="login-card" style="width:400px;padding:44px 40px 40px">
+            <div class="flex flex-col items-center mb-8">
+                <div class="w-14 h-14 rounded-2xl bg-d-accent flex items-center justify-center text-white font-bold text-xl mb-4 shadow-lg shadow-purple-900/30">DB</div>
+                <h2 style="font-size:22px;text-align:center">Welcome to DbChat</h2>
+                <p style="margin:0;text-align:center;font-size:13px;color:#6b7084" id="authSubtitle">Talk to your databases in plain English</p>
             </div>
 
             <!-- Sign In form -->
@@ -216,7 +229,7 @@
                 <label for="loginPass">Password</label>
                 <input id="loginPass" type="password" placeholder="Enter password" autocomplete="current-password"
                        onkeydown="if(event.key==='Enter')doLogin()">
-                <button id="loginBtn" class="login-btn" onclick="doLogin()">Sign In</button>
+                <button id="loginBtn" class="login-btn" onclick="doLogin()">Sign In →</button>
                 <div id="loginError" class="login-err"></div>
                 <div class="auth-toggle" onclick="showSignupForm()">Don't have an account? <strong>Sign Up</strong></div>
             </div>
@@ -232,10 +245,14 @@
                 <label for="signupPass2">Confirm Password</label>
                 <input id="signupPass2" type="password" placeholder="Confirm password" autocomplete="new-password"
                        onkeydown="if(event.key==='Enter')doSignup()">
-                <button id="signupBtn" class="login-btn" onclick="doSignup()">Create Account</button>
+                <button id="signupBtn" class="login-btn" onclick="doSignup()">Create Account →</button>
                 <div id="signupError" class="login-err"></div>
                 <div id="signupSuccess" class="login-err" style="color:#34d399"></div>
                 <div class="auth-toggle" onclick="showSigninForm()">Already have an account? <strong>Sign In</strong></div>
+            </div>
+
+            <div style="margin-top:24px;padding-top:16px;border-top:1px solid #252938;text-align:center">
+                <p style="font-size:11px;color:#4a4f65;margin:0">Supports PostgreSQL · MySQL · SQLite · MongoDB · Redis + more</p>
             </div>
         </div>
     </div>
@@ -244,50 +261,82 @@
     <div id="appShell" class="h-screen flex flex-col overflow-hidden" style="display:none">
 
         <!-- Top Bar -->
-        <header class="flex items-center justify-between px-5 py-2.5 border-b border-d-border bg-d-card shrink-0">
+        <header class="flex items-center justify-between px-5 py-2 border-b border-d-border bg-d-card shrink-0" style="height:52px">
             <div class="flex items-center gap-3">
-                <div class="w-8 h-8 rounded-lg bg-d-accent flex items-center justify-center text-white font-bold text-sm">DB</div>
-                <div><h1 class="text-sm font-semibold text-white leading-tight">DbChat</h1><p class="text-[11px] text-d-muted">Natural language SQL assistant</p></div>
+                <div class="w-8 h-8 rounded-lg bg-d-accent flex items-center justify-center text-white font-bold text-sm shadow-md shadow-purple-900/20">DB</div>
+                <h1 class="text-sm font-semibold text-white leading-tight">DbChat</h1>
             </div>
-            <div class="flex items-center gap-4">
+            <div class="flex items-center gap-3">
                 <div class="flex items-center gap-2 bg-d-input border border-d-border rounded-lg px-3 py-1.5">
                     <div class="w-2 h-2 rounded-full bg-d-green" style="animation:pulse 2s infinite"></div>
-                    <select id="dbSelector" class="bg-transparent text-sm text-d-text outline-none cursor-pointer appearance-none pr-5" style="background-image:url('data:image/svg+xml;charset=US-ASCII,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2212%22 height=%2212%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22%236b7084%22 stroke-width=%222%22%3E%3Cpolyline points=%226 9 12 15 18 9%22/%3E%3C/svg%3E');background-repeat:no-repeat;background-position:right 0 center"><option value="">Loading…</option></select>
+                    <select id="dbSelector" class="bg-transparent text-sm text-d-text outline-none cursor-pointer appearance-none pr-5" style="max-width:220px;background-image:url('data:image/svg+xml;charset=US-ASCII,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2212%22 height=%2212%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22%236b7084%22 stroke-width=%222%22%3E%3Cpolyline points=%226 9 12 15 18 9%22/%3E%3C/svg%3E');background-repeat:no-repeat;background-position:right 0 center"><option value="">Loading…</option></select>
                 </div>
-                <!-- User menu -->
                 <div class="flex items-center gap-2">
-                    <span id="userLabel" class="text-xs text-d-muted"></span>
                     <div id="userPerms" class="flex gap-1"></div>
-                    <button onclick="doLogout()" class="text-xs text-d-muted hover:text-d-red border border-d-border rounded-lg px-3 py-1.5 transition" title="Sign out">Logout</button>
+                    <span id="userLabel" class="text-xs text-d-muted font-medium"></span>
+                    <button onclick="doLogout()" class="text-xs text-d-muted hover:text-d-red border border-d-border rounded-md px-2.5 py-1 transition" title="Sign out">↪ Out</button>
                 </div>
             </div>
             <input type="hidden" id="chatUrl" value="">
             <input type="hidden" id="vizUrl" value="http://localhost:8001">
         </header>
 
-        <!-- Tab bar -->
-        <div id="tabBar" class="tab-bar" style="overflow-x:auto;white-space:nowrap">
-            <button class="tab-btn active" onclick="switchTab('chat')" id="tabChat">💬 Chat</button>
-            <button class="tab-btn" onclick="switchTab('schema')" id="tabSchema">🗂 Schema</button>
-            <button class="tab-btn" onclick="switchTab('workbench')" id="tabWorkbench">⚡ Workbench</button>
-            <button class="tab-btn" onclick="switchTab('saved')" id="tabSaved">⭐ Saved</button>
-            <button class="tab-btn" onclick="switchTab('dashboard')" id="tabDashboard">📊 Dashboards</button>
-            <button class="tab-btn" onclick="switchTab('lineage')" id="tabLineage">🔗 Lineage</button>
-            <button class="tab-btn" onclick="switchTab('intelligence')" id="tabIntelligence">📈 Intelligence</button>
-            <button class="tab-btn" onclick="switchTab('templates')" id="tabTemplates">📋 Templates</button>
-            <button class="tab-btn" onclick="switchTab('crossdb')" id="tabCrossDb">🔀 Cross-DB</button>
-            <button class="tab-btn" onclick="switchTab('erd')" id="tabErd">🗺 ERD</button>
-            <button class="tab-btn" onclick="switchTab('quality')" id="tabQuality">✅ Quality</button>
-            <button class="tab-btn" onclick="switchTab('optimizer')" id="tabOptimizer">⚡ Optimizer</button>
-            <button class="tab-btn" onclick="switchTab('training')" id="tabTraining">🧠 Training</button>
-            <button class="tab-btn" onclick="switchTab('fileupload')" id="tabFileUpload">📁 Files</button>
-            <button class="tab-btn" onclick="switchTab('pipeline')" id="tabPipeline">🔄 Pipeline</button>
-            <button class="tab-btn" onclick="switchTab('apigen')" id="tabApiGen">🔌 API</button>
-            <button class="tab-btn" onclick="switchTab('migration')" id="tabMigration">🏗 Migrate</button>
-            <button class="tab-btn" onclick="switchTab('embed')" id="tabEmbed">🧩 Embed</button>
-            <button class="tab-btn" onclick="switchTab('admin')" id="tabAdmin" style="display:none">👥 Admin</button>
-            <button class="tab-btn" onclick="switchTab('activity')" id="tabActivity">📋 Activity</button>
-        </div>
+        <!-- Sidebar + Content Layout -->
+        <div class="flex flex-1 overflow-hidden">
+
+        <!-- Sidebar Nav -->
+        <nav id="sideNav" class="sidebar">
+            <button class="sidebar-toggle" onclick="toggleSidebar()" title="Collapse sidebar">☰</button>
+
+            <div class="nav-group">
+                <div class="nav-label">Core</div>
+                <button class="nav-item active" onclick="switchTab('chat')" id="tabChat"><span class="nav-icon">💬</span><span class="nav-text">Chat</span></button>
+                <button class="nav-item" onclick="switchTab('schema')" id="tabSchema"><span class="nav-icon">🗂</span><span class="nav-text">Schema</span></button>
+                <button class="nav-item" onclick="switchTab('workbench')" id="tabWorkbench"><span class="nav-icon">⚡</span><span class="nav-text">Workbench</span></button>
+                <button class="nav-item" onclick="switchTab('saved')" id="tabSaved"><span class="nav-icon">⭐</span><span class="nav-text">Saved</span></button>
+            </div>
+
+            <div class="nav-group">
+                <div class="nav-label">Analytics</div>
+                <button class="nav-item" onclick="switchTab('dashboard')" id="tabDashboard"><span class="nav-icon">📊</span><span class="nav-text">Dashboards</span></button>
+                <button class="nav-item" onclick="switchTab('templates')" id="tabTemplates"><span class="nav-icon">📋</span><span class="nav-text">Templates</span></button>
+                <button class="nav-item" onclick="switchTab('crossdb')" id="tabCrossDb"><span class="nav-icon">🔀</span><span class="nav-text">Cross-DB</span></button>
+                <button class="nav-item" onclick="switchTab('erd')" id="tabErd"><span class="nav-icon">🗺</span><span class="nav-text">ERD</span></button>
+                <button class="nav-item" onclick="switchTab('lineage')" id="tabLineage"><span class="nav-icon">🔗</span><span class="nav-text">Lineage</span></button>
+            </div>
+
+            <div class="nav-group">
+                <div class="nav-label">AI & Quality</div>
+                <button class="nav-item" onclick="switchTab('intelligence')" id="tabIntelligence"><span class="nav-icon">📈</span><span class="nav-text">Intelligence</span></button>
+                <button class="nav-item" onclick="switchTab('quality')" id="tabQuality"><span class="nav-icon">✅</span><span class="nav-text">Quality</span></button>
+                <button class="nav-item" onclick="switchTab('optimizer')" id="tabOptimizer"><span class="nav-icon">⚙</span><span class="nav-text">Optimizer</span></button>
+                <button class="nav-item" onclick="switchTab('training')" id="tabTraining"><span class="nav-icon">🧠</span><span class="nav-text">Training</span></button>
+            </div>
+
+            <div class="nav-group">
+                <div class="nav-label">Data Ops</div>
+                <button class="nav-item" onclick="switchTab('fileupload')" id="tabFileUpload"><span class="nav-icon">📁</span><span class="nav-text">Files</span></button>
+                <button class="nav-item" onclick="switchTab('pipeline')" id="tabPipeline"><span class="nav-icon">🔄</span><span class="nav-text">Pipeline</span></button>
+                <button class="nav-item" onclick="switchTab('migration')" id="tabMigration"><span class="nav-icon">🏗</span><span class="nav-text">Migrate</span></button>
+                <button class="nav-item" onclick="switchTab('apigen')" id="tabApiGen"><span class="nav-icon">🔌</span><span class="nav-text">API</span></button>
+                <button class="nav-item" onclick="switchTab('embed')" id="tabEmbed"><span class="nav-icon">🧩</span><span class="nav-text">Embed</span></button>
+            </div>
+
+            <div class="nav-group">
+                <div class="nav-label">Knowledge</div>
+                <button class="nav-item" onclick="switchTab('knowledge')" id="tabKnowledge"><span class="nav-icon">🧬</span><span class="nav-text">Knowledge</span></button>
+                <button class="nav-item" onclick="switchTab('glossary')" id="tabGlossary"><span class="nav-icon">📖</span><span class="nav-text">Glossary</span></button>
+            </div>
+
+            <div class="nav-group" id="adminNavGroup" style="display:none">
+                <div class="nav-label">Admin</div>
+                <button class="nav-item" onclick="switchTab('admin')" id="tabAdmin"><span class="nav-icon">👥</span><span class="nav-text">Admin</span></button>
+                <button class="nav-item" onclick="switchTab('activity')" id="tabActivity"><span class="nav-icon">📋</span><span class="nav-text">Activity</span></button>
+            </div>
+        </nav>
+
+        <!-- Main Content Area -->
+        <div id="mainContent" class="flex-1 flex flex-col overflow-hidden">
 
         <!-- Chat Tab -->
         <div id="chatTab" class="flex flex-1 overflow-hidden">
@@ -466,16 +515,32 @@
                     </div>
                 </div>
 
+                <!-- Model Routing -->
+                <div class="bg-d-card border border-d-border rounded-xl p-4 mb-6">
+                    <div class="flex items-center justify-between mb-3">
+                        <div>
+                            <h2 class="text-sm font-semibold text-white">Model Routing</h2>
+                            <p class="text-xs text-d-muted mt-1">Route different tasks to specialized models for better cost, speed and quality.</p>
+                        </div>
+                        <button onclick="loadModelRouting()" class="chip text-xs">↻ Refresh</button>
+                    </div>
+                    <div id="modelRoutingContainer" class="space-y-2">
+                        <p class="text-xs text-d-muted">Loading…</p>
+                    </div>
+                    <div class="mt-3 flex items-center justify-between">
+                        <span id="routingSaveStatus" class="text-xs text-d-muted"></span>
+                    </div>
+                </div>
+
                 <div id="adminUserMgmtSection">
                 <div class="flex items-center justify-between mb-5">
                     <div>
-                        <h2 class="text-lg font-semibold text-white">User Management</h2>
-                        <p class="text-xs text-d-muted mt-1">Select a database, then manage user permissions for it. Changes save automatically.</p>
+                        <h2 class="text-lg font-semibold text-white">User & Access Management</h2>
+                        <p class="text-xs text-d-muted mt-1">Select a database, then manage user permissions and table-level access.</p>
                     </div>
                     <button onclick="loadAdminUsersForDb()" class="chip">↻ Refresh</button>
                 </div>
                 <div class="admin-panel">
-                    <!-- DB selector -->
                     <div style="padding:12px 20px;border-bottom:1px solid #252938;background:#0d0f14">
                         <div class="flex items-center gap-3">
                             <label class="text-xs text-d-muted font-semibold uppercase">Database:</label>
@@ -490,10 +555,35 @@
                         <span class="text-xs font-semibold text-d-muted uppercase" style="width:100px;text-align:center">Admin</span>
                         <span class="text-xs font-semibold text-d-muted uppercase" style="width:100px;text-align:center">Reindex</span>
                         <span class="text-xs font-semibold text-d-muted uppercase" style="width:100px;text-align:center">Query</span>
+                        <span class="text-xs font-semibold text-d-muted uppercase" style="width:80px;text-align:center">Tables</span>
                         <span style="width:60px"></span>
                     </div>
                     <div id="adminUserList"><p class="text-sm text-d-muted p-6">Select a database above to manage user permissions.</p></div>
                 </div>
+
+                <!-- Table Access Modal (inline) -->
+                <div id="tableAccessModal" class="modal-overlay" onclick="if(event.target===this)closeTableAccessModal()">
+                    <div class="modal-box" style="max-width:560px">
+                        <div class="modal-header">
+                            <h3 class="text-sm font-semibold text-white flex-1">Table Access — <span id="tableAccessUser"></span></h3>
+                            <button class="modal-close" onclick="closeTableAccessModal()">✕</button>
+                        </div>
+                        <div class="modal-body" style="padding:16px 20px">
+                            <p class="text-xs text-d-muted mb-3">Check the tables this user can query. Unchecking all gives access to <strong>all tables</strong>.</p>
+                            <div class="flex items-center gap-2 mb-3">
+                                <button onclick="tableAccessSelectAll()" class="chip text-xs">Select All</button>
+                                <button onclick="tableAccessSelectNone()" class="chip text-xs">Clear All</button>
+                                <span id="tableAccessCount" class="text-xs text-d-muted ml-auto"></span>
+                            </div>
+                            <div id="tableAccessList" class="space-y-1 max-h-[50vh] overflow-y-auto pr-1"></div>
+                            <div class="mt-4 flex items-center justify-between">
+                                <span id="tableAccessStatus" class="text-xs text-d-muted"></span>
+                                <button onclick="saveTableAccess()" class="chip" style="background:rgba(124,110,255,.15);color:#a78bfa;border-color:rgba(124,110,255,.3)">Save Table Access</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 </div><!-- /adminUserMgmtSection -->
             </div>
         </div><!-- /adminTab -->
@@ -1113,6 +1203,108 @@
             </div>
         </div>
 
+        <!-- ═══════════ KNOWLEDGE GRAPH TAB ═══════════ -->
+        <div id="knowledgeTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div><h2 class="text-lg font-semibold text-white">Entity Knowledge Graph</h2>
+                    <p class="text-xs text-d-muted mt-1">Map columns across databases to canonical business concepts. Auto-discover entity matches via fingerprinting.</p></div>
+                    <div class="flex gap-2">
+                        <button onclick="fingerprintConnection()" class="chip" style="background:rgba(52,211,153,.15);color:#34d399;border-color:rgba(52,211,153,.3)">🔍 Fingerprint DB</button>
+                        <button onclick="discoverMatches()" class="chip" style="background:rgba(124,110,255,.15);color:#a78bfa;border-color:rgba(124,110,255,.3)">🧬 Discover Matches</button>
+                    </div>
+                </div>
+
+                <div class="bg-d-card border border-d-border rounded-xl p-4 mb-4">
+                    <h3 class="text-sm font-semibold text-white mb-3">Create Entity Concept</h3>
+                    <div class="grid gap-3" style="grid-template-columns:1fr 1fr 1fr">
+                        <input id="conceptName" class="search-input" placeholder="e.g. Employee ID">
+                        <input id="conceptDesc" class="search-input" placeholder="Description (optional)">
+                        <input id="conceptCategory" class="search-input" placeholder="Category (optional)">
+                    </div>
+                    <button onclick="createConcept()" class="chip mt-3" style="background:rgba(124,110,255,.15);color:#a78bfa;border-color:rgba(124,110,255,.3)">+ Create Concept</button>
+                </div>
+
+                <div id="discoveryResults" class="mb-4" style="display:none">
+                    <h3 class="text-sm font-semibold text-white mb-2">Auto-Discovered Matches</h3>
+                    <div id="discoveryList"></div>
+                </div>
+
+                <div id="conceptsList">
+                    <h3 class="text-sm font-semibold text-white mb-2">Entity Concepts</h3>
+                    <div id="conceptsContent" class="text-xs text-d-muted">Loading...</div>
+                </div>
+
+                <div class="bg-d-card border border-d-border rounded-xl p-4 mt-4">
+                    <h3 class="text-sm font-semibold text-white mb-3">Add Column Mapping</h3>
+                    <div class="grid gap-3" style="grid-template-columns:1fr 1fr 1fr 1fr">
+                        <select id="mappingConcept" class="col-select"><option value="">Concept</option></select>
+                        <select id="mappingConn" class="col-select"><option value="">Connection</option></select>
+                        <input id="mappingTable" class="search-input" placeholder="Table name">
+                        <input id="mappingColumn" class="search-input" placeholder="Column name">
+                    </div>
+                    <button onclick="createMapping()" class="chip mt-3" style="background:rgba(124,110,255,.15);color:#a78bfa;border-color:rgba(124,110,255,.3)">+ Add Mapping</button>
+                </div>
+
+                <div class="bg-d-card border border-d-border rounded-xl p-4 mt-4">
+                    <h3 class="text-sm font-semibold text-white mb-3">Column Annotations</h3>
+                    <div class="grid gap-3" style="grid-template-columns:1fr 1fr 1fr 2fr">
+                        <select id="annotConn" class="col-select"><option value="">Connection</option></select>
+                        <input id="annotTable" class="search-input" placeholder="Table name">
+                        <input id="annotColumn" class="search-input" placeholder="Column name">
+                        <input id="annotText" class="search-input" placeholder="What does this column mean?">
+                    </div>
+                    <button onclick="createAnnotation()" class="chip mt-3" style="background:rgba(52,211,153,.15);color:#34d399;border-color:rgba(52,211,153,.3)">+ Add Annotation</button>
+                    <div id="annotationsList" class="mt-3"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══════════ GLOSSARY TAB ═══════════ -->
+        <div id="glossaryTab" class="flex-1 overflow-y-auto px-6 py-5" style="display:none">
+            <div class="max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <div><h2 class="text-lg font-semibold text-white">Business Glossary</h2>
+                    <p class="text-xs text-d-muted mt-1">Define business terms so the AI consistently uses the right definitions across all queries.</p></div>
+                </div>
+
+                <div class="bg-d-card border border-d-border rounded-xl p-4 mb-4">
+                    <h3 class="text-sm font-semibold text-white mb-3">Add Business Term</h3>
+                    <div class="grid gap-3" style="grid-template-columns:1fr 2fr">
+                        <input id="glossTerm" class="search-input" placeholder="Term (e.g. Revenue)">
+                        <input id="glossDef" class="search-input" placeholder="Definition (e.g. SUM of completed order amounts)">
+                    </div>
+                    <div class="grid gap-3 mt-2" style="grid-template-columns:1fr 1fr 1fr">
+                        <input id="glossSQL" class="search-input font-mono" placeholder="SQL expression (optional)" style="font-size:11px">
+                        <input id="glossCategory" class="search-input" placeholder="Category (optional)">
+                        <input id="glossSynonyms" class="search-input" placeholder="Synonyms (comma-separated)">
+                    </div>
+                    <button onclick="createGlossaryTerm()" class="chip mt-3" style="background:rgba(124,110,255,.15);color:#a78bfa;border-color:rgba(124,110,255,.3)">+ Add Term</button>
+                </div>
+
+                <div id="glossaryList">
+                    <div id="glossaryContent" class="text-xs text-d-muted">Loading...</div>
+                </div>
+
+                <div class="bg-d-card border border-d-border rounded-xl p-4 mt-4">
+                    <h3 class="text-sm font-semibold text-white mb-3">Query Corrections</h3>
+                    <p class="text-xs text-d-muted mb-3">Teach the AI from its mistakes. When a query was wrong, record the correction so it learns.</p>
+                    <div class="grid gap-3" style="grid-template-columns:2fr 1fr">
+                        <input id="corrPrompt" class="search-input" placeholder="Original question that got wrong results">
+                        <input id="corrSQL" class="search-input font-mono" placeholder="Wrong SQL (optional)" style="font-size:11px">
+                    </div>
+                    <div class="grid gap-3 mt-2" style="grid-template-columns:2fr 1fr">
+                        <input id="corrText" class="search-input" placeholder="What you actually meant / correct interpretation">
+                        <input id="corrFixedSQL" class="search-input font-mono" placeholder="Correct SQL (optional)" style="font-size:11px">
+                    </div>
+                    <button onclick="createCorrection()" class="chip mt-3" style="background:rgba(251,191,36,.15);color:#fbbf24;border-color:rgba(251,191,36,.3)">+ Record Correction</button>
+                    <div id="correctionsList" class="mt-3"></div>
+                </div>
+            </div>
+        </div>
+
+        </div><!-- /mainContent -->
+        </div><!-- /appBody (sidebar + content) -->
     </div><!-- /appShell -->
 
     <!-- ═══════════ SCHEDULE MODAL (F6) ═══════════ -->
@@ -1285,10 +1477,10 @@
         </div>
     </div>
 
-    <script src="app.js?v=16.0"></script>
+    <script src="app.js?v=18.0"></script>
     <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
     <script>mermaid.initialize({startOnLoad:false, theme:'dark'});</script>
-    <script src="features.js?v=17.0"></script>
+    <script src="features.js?v=18.0"></script>
     <style>@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}</style>
 </body>
 </html>
